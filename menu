@@ -221,17 +221,14 @@ EOF
 }
 
 badvpn_on(){
-  if ! command -v badvpn-udpgw >/dev/null 2>&1; then
-    echo -e "${YELLOW}Instalando badvpn...${NC}"
-    apt-get install -y badvpn >/dev/null 2>&1
-  fi
-  command -v badvpn-udpgw >/dev/null 2>&1 || { echo -e "${RED}No se pudo instalar badvpn${NC}"; return; }
+  local bin; bin=$(command -v badvpn-udpgw)
+  [[ -z "$bin" ]] && { echo -e "${RED}badvpn-udpgw no esta instalado.${NC}"; echo -e "${YELLOW}Reinstala el panel o compilalo (ver README).${NC}"; return; }
   cat > /etc/systemd/system/jgx-badvpn.service <<EOF
 [Unit]
 Description=JgXeinz BadVPN UDPGW
 After=network.target
 [Service]
-ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 500 --max-connections-for-client 10
+ExecStart=$bin --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 500 --max-connections-for-client 10
 Restart=always
 [Install]
 WantedBy=multi-user.target

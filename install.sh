@@ -37,7 +37,24 @@ echo -e "${GREEN}KEY valida.${NC}\n"
 # --- dependencias ---
 echo -e "${YELLOW}Instalando dependencias...${NC}"
 apt-get update -y >/dev/null 2>&1
-apt-get install -y python3 curl wget screen figlet badvpn >/dev/null 2>&1
+apt-get install -y python3 curl wget screen figlet cmake make gcc git >/dev/null 2>&1
+
+# --- badvpn-udpgw (se compila: ya no esta en los repos de Ubuntu) ---
+if ! command -v badvpn-udpgw >/dev/null 2>&1; then
+  echo -e "${YELLOW}Compilando badvpn-udpgw (para voz/UDP)...${NC}"
+  rm -rf /tmp/badvpn
+  git clone --depth 1 https://github.com/ambrop72/badvpn.git /tmp/badvpn >/dev/null 2>&1
+  mkdir -p /tmp/badvpn/build
+  ( cd /tmp/badvpn/build && \
+    cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \
+      -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion" >/dev/null 2>&1 && \
+    make >/dev/null 2>&1 && \
+    cp udpgw/badvpn-udpgw /usr/bin/ )
+  rm -rf /tmp/badvpn
+  command -v badvpn-udpgw >/dev/null 2>&1 \
+    && echo -e "${GREEN}badvpn-udpgw instalado${NC}" \
+    || echo -e "${RED}No se pudo compilar badvpn (se puede hacer despues)${NC}"
+fi
 
 # --- archivos ---
 echo -e "${YELLOW}Descargando archivos...${NC}"
