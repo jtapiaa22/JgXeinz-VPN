@@ -348,6 +348,22 @@ backup(){
   done
 }
 
+actualizar(){
+  banner; echo -e "${WHITE} ACTUALIZAR PANEL${NC}\n"
+  echo -e "${YELLOW}Descargando ultima version...${NC}"
+  if curl -fsSL "$REPO/menu" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
+    mv /usr/bin/menu.new /usr/bin/menu
+    chmod +x /usr/bin/menu
+    curl -fsSL "$REPO/proxy.py" -o "$PROXY" 2>/dev/null
+    echo -e "${GREEN}Panel actualizado. Reiniciando...${NC}"
+    sleep 1
+    exec /usr/bin/menu
+  else
+    rm -f /usr/bin/menu.new
+    echo -e "${RED}No se pudo actualizar (repo privado o sin internet?).${NC}"; pause
+  fi
+}
+
 # --------------------------------------------------------------
 #  MENU PRINCIPAL
 # --------------------------------------------------------------
@@ -360,8 +376,8 @@ while true; do
   echo -e "${YELLOW}[03]${NC} Remover usuario     ${YELLOW}[10]${NC} Modo de conexion"
   echo -e "${YELLOW}[04]${NC} Monitor online      ${YELLOW}[11]${NC} Info del VPS"
   echo -e "${YELLOW}[05]${NC} Cambiar fecha       ${YELLOW}[12]${NC} Backup"
-  echo -e "${YELLOW}[06]${NC} Cambiar limite      ${YELLOW}[00]${NC} Salir"
-  echo -e "${YELLOW}[07]${NC} Cambiar contrasena"
+  echo -e "${YELLOW}[06]${NC} Cambiar limite      ${YELLOW}[13]${NC} Actualizar panel"
+  echo -e "${YELLOW}[07]${NC} Cambiar contrasena  ${YELLOW}[00]${NC} Salir"
   echo -e "${BLUE}-----------------------------------------------${NC}"
   read -rp "Opcion: " opt
   case $opt in
@@ -377,6 +393,7 @@ while true; do
     10) modo_conexion;;
     11) info_vps;;
     12) backup;;
+    13) actualizar;;
     0|00) clear; exit 0;;
     *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
   esac
