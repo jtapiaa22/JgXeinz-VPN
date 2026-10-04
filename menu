@@ -348,6 +348,195 @@ backup(){
   done
 }
 
+optimizar(){
+  banner; echo -e "${WHITE} OPTIMIZAR RED (BBR)${NC}\n"
+  modprobe tcp_bbr 2>/dev/null
+  cat > /etc/sysctl.d/99-jgxeinz.conf <<'EOF'
+net.core.default_qdisc=fq
+net.ipv4.tcp_congestion_control=bbr
+net.ipv4.tcp_fastopen=3
+net.core.rmem_max=16777216
+net.core.wmem_max=16777216
+net.ipv4.tcp_rmem=4096 87380 16777216
+net.ipv4.tcp_wmem=4096 65536 16777216
+EOF
+  sysctl --system >/dev/null 2>&1
+  local cc; cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+  echo -e "${GREEN}Optimizacion aplicada.${NC}"
+  echo -e " Control de congestion: ${GREEN}$cc${NC}"
+  [[ "$cc" == "bbr" ]] && echo -e " ${GREEN}BBR activo${NC}" || echo -e " ${YELLOW}BBR no se activo (kernel sin soporte)${NC}"
+  pause
+}
+
+editar_banner(){
+  banner; echo -e "${WHITE} BANNER (mensaje al conectar)${NC}\n"
+  if [[ -f "$DIR/banner.txt" ]]; then
+    echo -e "Banner actual:\n${CYAN}$(cat "$DIR/banner.txt")${NC}\n"
+  else
+    echo -e "(todavia no hay banner)\n"
+  fi
+  echo -e "Escribi el nuevo mensaje. Para terminar, una linea con solo: ${YELLOW}END${NC}\n"
+  local tmp; tmp=$(mktemp)
+  while IFS= read -r line; do
+    [[ "$line" == "END" ]] && break
+    echo "$line" >> "$tmp"
+  done
+  [[ ! -s "$tmp" ]] && { rm -f "$tmp"; echo -e "${RED}Sin cambios${NC}"; pause; return; }
+  mv "$tmp" "$DIR/banner.txt"
+  echo "Banner $DIR/banner.txt" > /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+  echo -e "\n${GREEN}Banner actualizado${NC}"; pause
+}
+
+dropbear(){
+  while true; do
+    banner; echo -e "${WHITE} DROPBEAR (otro servidor SSH)${NC}\n"
+    if systemctl is-active --quiet dropbear 2>/dev/null; then
+      local dp; dp=$(ss -tlnp 2>/dev/null | grep -o 'dropbear.*' >/dev/null; grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
+      echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$dp${NC}\n"
+      echo -e "${YELLOW}[1]${NC} Cambiar puerto"
+      echo -e "${YELLOW}[2]${NC} Desactivar"
+      echo -e "${YELLOW}[0]${NC} Volver"
+      echo ""; read -rp "Opcion: " o
+      case $o in
+        1) read -rp "Nuevo puerto: " p
+           [[ "$p" =~ ^[0-9]+$ ]] && { sed -i "s/^DROPBEAR_PORT=.*/DROPBEAR_PORT=$p/" /etc/default/dropbear; systemctl restart dropbear; echo -e "${GREEN}Puerto cambiado a $p. Abrilo en AWS.${NC}"; } || echo -e "${RED}Puerto invalido${NC}"; pause;;
+        2) systemctl disable --now dropbear >/dev/null 2>&1; echo -e "${GREEN}Dropbear desactivado${NC}"; pause;;
+        0) break;;
+      esac
+    else
+      echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
+      read -rp "Puerto para Dropbear [ej: 90]: " p
+      [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; continue; }
+      command -v dropbear >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando dropbear...${NC}"; apt-get install -y dropbear >/dev/null 2>&1; }
+      grep -qx "/bin/false" /etc/shells 2>/dev/null || echo "/bin/false" >> /etc/shells
+      sed -i 's/^NO_START=1/NO_START=0/' /etc/default/dropbear 2>/dev/null
+      if grep -q "^DROPBEAR_PORT=" /etc/default/dropbear 2>/dev/null; then
+        sed -i "s/^DROPBEAR_PORT=.*/DROPBEAR_PORT=$p/" /etc/default/dropbear
+      else
+        echo "DROPBEAR_PORT=$p" >> /etc/default/dropbear
+      fi
+      systemctl enable dropbear >/dev/null 2>&1
+      systemctl restart dropbear >/dev/null 2>&1
+      systemctl is-active --quiet dropbear \
+        && echo -e "\n${GREEN}Dropbear activo en el puerto $p. Abrilo en AWS y usalo como otro metodo SSH.${NC}" \
+        || echo -e "\n${RED}No se pudo activar${NC}"
+      pause
+    fi
+  done
+}
+
+trafico(){
+  while true; do
+    banner; echo -e "${WHITE} TRAFICO POR USUARIO${NC}\n"
+    echo -e "${YELLOW}(aprox: mide la subida del servidor por usuario)${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Activar medicion"
+    echo -e "${YELLOW}[2]${NC} Ver consumo"
+    echo -e "${YELLOW}[3]${NC} Reiniciar contadores"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1)
+        command -v iptables >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando iptables...${NC}"; apt-get install -y iptables >/dev/null 2>&1; }
+        while read -r user _; do
+          [[ -z "$user" ]] && continue
+          local uid; uid=$(id -u "$user" 2>/dev/null) || continue
+          iptables -C OUTPUT -m owner --uid-owner "$uid" 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner "$uid"
+        done < "$DB"
+        echo -e "\n${GREEN}Medicion activada para todos los usuarios${NC}"; pause;;
+      2)
+        banner; echo -e "${WHITE} CONSUMO POR USUARIO${NC}\n"
+        printf "${WHITE}%-18s %-12s${NC}\n" "USUARIO" "CONSUMO"
+        echo "-----------------------------------"
+        while read -r user _; do
+          [[ -z "$user" ]] && continue
+          local uid b mb; uid=$(id -u "$user" 2>/dev/null) || continue
+          b=$(iptables -L OUTPUT -v -n -x 2>/dev/null | awk -v p="owner UID match $uid" '$0 ~ p {s+=$2} END{print s+0}')
+          mb=$(( b / 1024 / 1024 ))
+          printf "%-18s %-12s\n" "$user" "${mb} MB"
+        done < "$DB"
+        pause;;
+      3) iptables -Z OUTPUT 2>/dev/null; echo -e "\n${GREEN}Contadores reiniciados${NC}"; pause;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
+  done
+}
+
+herramientas(){
+  while true; do
+    banner; echo -e "${WHITE} HERRAMIENTAS${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Optimizar red (BBR)"
+    echo -e "${YELLOW}[2]${NC} Banner / mensaje de conexion"
+    echo -e "${YELLOW}[3]${NC} Dropbear (otro SSH)"
+    echo -e "${YELLOW}[4]${NC} Trafico por usuario"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1) optimizar;;
+      2) editar_banner;;
+      3) dropbear;;
+      4) trafico;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
+  done
+}
+
+limiter(){
+  banner; echo -e "${WHITE} LIMITER (control de conexiones)${NC}\n"
+  if systemctl is-active --quiet jgx-limiter 2>/dev/null; then
+    echo -e "Estado actual: ${GREEN}ACTIVADO${NC}\n"
+    read -rp "Desactivar el limiter? [s/n]: " r
+    [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now jgx-limiter >/dev/null 2>&1; echo -e "\n${GREEN}Limiter desactivado${NC}"; }
+  else
+    echo -e "Estado actual: ${RED}DESACTIVADO${NC}\n"
+    echo -e "Corta las conexiones que pasen el limite de cada usuario."
+    echo -e "Revisa cada 5 segundos.\n"
+    read -rp "Activar el limiter? [s/n]: " r
+    if [[ "$r" =~ ^[sS]$ ]]; then
+      cat > "$DIR/limiter.sh" <<'LIM'
+#!/bin/bash
+DB="/etc/jgxeinz/users.db"
+while true; do
+  if [[ -f "$DB" ]]; then
+    while read -r user limite; do
+      [[ -z "$user" ]] && continue
+      [[ ! "$limite" =~ ^[0-9]+$ ]] && continue
+      mapfile -t pids < <(ps -u "$user" -o pid=,comm= 2>/dev/null | grep -E 'sshd' | awk '{print $1}')
+      n=${#pids[@]}
+      if (( n > limite )); then
+        excess=$(( n - limite ))
+        for ((i=0; i<excess; i++)); do
+          kill -9 "${pids[$((n-1-i))]}" 2>/dev/null
+        done
+      fi
+    done < "$DB"
+  fi
+  sleep 5
+done
+LIM
+      chmod +x "$DIR/limiter.sh"
+      cat > /etc/systemd/system/jgx-limiter.service <<EOF
+[Unit]
+Description=JgXeinz Limiter
+After=network.target
+[Service]
+ExecStart=/bin/bash $DIR/limiter.sh
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+      systemctl daemon-reload
+      systemctl enable --now jgx-limiter >/dev/null 2>&1
+      systemctl is-active --quiet jgx-limiter \
+        && echo -e "\n${GREEN}Limiter activado${NC}" \
+        || echo -e "\n${RED}No se pudo activar${NC}"
+    fi
+  fi
+  pause
+}
+
 actualizar(){
   banner; echo -e "${WHITE} ACTUALIZAR PANEL${NC}\n"
   echo -e "${YELLOW}Descargando ultima version...${NC}"
@@ -369,6 +558,7 @@ actualizar(){
 # --------------------------------------------------------------
 while true; do
   banner
+  systemctl is-active --quiet jgx-limiter 2>/dev/null && lim_st="${GREEN}ON${NC}" || lim_st="${RED}OFF${NC}"
   echo -e "${WHITE} IP: ${GREEN}$(get_ip)${WHITE}    Usuarios: ${GREEN}$(grep -c . "$DB")${WHITE}    v$VERSION${NC}"
   echo -e "${BLUE}-----------------------------------------------${NC}"
   echo -e "${YELLOW}[01]${NC} Crear usuario       ${YELLOW}[08]${NC} Remover expirados"
@@ -377,7 +567,9 @@ while true; do
   echo -e "${YELLOW}[04]${NC} Monitor online      ${YELLOW}[11]${NC} Info del VPS"
   echo -e "${YELLOW}[05]${NC} Cambiar fecha       ${YELLOW}[12]${NC} Backup"
   echo -e "${YELLOW}[06]${NC} Cambiar limite      ${YELLOW}[13]${NC} Actualizar panel"
-  echo -e "${YELLOW}[07]${NC} Cambiar contrasena  ${YELLOW}[00]${NC} Salir"
+  echo -e "${YELLOW}[07]${NC} Cambiar contrasena  ${YELLOW}[14]${NC} Limiter $lim_st"
+  echo -e "                         ${YELLOW}[15]${NC} Herramientas"
+  echo -e "                         ${YELLOW}[00]${NC} Salir"
   echo -e "${BLUE}-----------------------------------------------${NC}"
   read -rp "Opcion: " opt
   case $opt in
@@ -394,6 +586,8 @@ while true; do
     11) info_vps;;
     12) backup;;
     13) actualizar;;
+    14) limiter;;
+    15) herramientas;;
     0|00) clear; exit 0;;
     *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
   esac

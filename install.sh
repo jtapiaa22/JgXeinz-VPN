@@ -37,7 +37,9 @@ echo -e "${GREEN}KEY valida.${NC}\n"
 # --- dependencias ---
 echo -e "${YELLOW}Instalando dependencias...${NC}"
 apt-get update -y >/dev/null 2>&1
-apt-get install -y python3 curl wget screen figlet cmake make gcc git >/dev/null 2>&1
+apt-get install -y python3 curl wget screen figlet cmake make gcc git dropbear iptables >/dev/null 2>&1
+# dropbear se deja apagado para que no choque con OpenSSH en el 22 (el menu lo activa)
+systemctl disable --now dropbear >/dev/null 2>&1
 
 # --- badvpn-udpgw (se compila: ya no esta en los repos de Ubuntu) ---
 if ! command -v badvpn-udpgw >/dev/null 2>&1; then
@@ -47,6 +49,7 @@ if ! command -v badvpn-udpgw >/dev/null 2>&1; then
   mkdir -p /tmp/badvpn/build
   ( cd /tmp/badvpn/build && \
     cmake .. -DBUILD_NOTHING_BY_DEFAULT=1 -DBUILD_UDPGW=1 \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
       -DCMAKE_C_FLAGS="-Wno-error=implicit-function-declaration -Wno-error=implicit-int -Wno-error=int-conversion" >/dev/null 2>&1 && \
     make >/dev/null 2>&1 && \
     cp udpgw/badvpn-udpgw /usr/bin/ )
