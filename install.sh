@@ -64,8 +64,14 @@ curl -fsSL "$BASE/menu"     -o /usr/bin/menu
 chmod +x /usr/bin/menu
 
 # --- habilitar login por contrasena (para HTTP Custom) ---
+# AWS/cloud desactivan el login por contrasena; hay que forzarlo.
 mkdir -p /etc/ssh/sshd_config.d
-echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/99-jgxeinz.conf
+sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null
+for f in /etc/ssh/sshd_config.d/*.conf; do
+  [ -e "$f" ] && sed -i 's/^PasswordAuthentication no/PasswordAuthentication yes/' "$f"
+done
+# el prefijo 00- hace que se lea primero (en sshd gana el primer valor)
+echo "PasswordAuthentication yes" > /etc/ssh/sshd_config.d/00-jgxeinz.conf
 systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
 
 clear
