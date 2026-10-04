@@ -4,8 +4,8 @@
 #==============================================================
 
 # ------------------- CONFIG (edita aca) -------------------
-GITHUB_USER="TU_USUARIO"       # <-- tu usuario de GitHub
-GITHUB_REPO="Script_VPS"
+GITHUB_USER="jtapiaa22"
+GITHUB_REPO="JgXeinz-VPN"
 BRANCH="main"
 # ----------------------------------------------------------
 BASE="https://raw.githubusercontent.com/$GITHUB_USER/$GITHUB_REPO/$BRANCH"
