@@ -9,6 +9,7 @@
 PANEL_NAME="JgXeinz VPN"
 VERSION="1.0"
 UDPGW_PORT="7300"
+REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
 
 DIR="/etc/jgxeinz"
@@ -107,19 +108,23 @@ remover_usuario(){
 
 monitor_online(){
   banner; echo -e "${WHITE} MONITOR ONLINE${NC}\n"
-  printf "${WHITE}%-20s %-12s${NC}\n" "USUARIO" "CONEXIONES"
-  echo "-----------------------------------"
-  local total=0
-  while read -r user _; do
+  printf "${WHITE}%-18s %-10s %-8s${NC}\n" "USUARIO" "ESTADO" "CONEX"
+  echo "-------------------------------------"
+  local online=0 total=0
+  while read -r user limite; do
     [[ -z "$user" ]] && continue
+    [[ -z "$limite" ]] && limite=1
     local n; n=$(ps -u "$user" 2>/dev/null | grep -c sshd)
+    total=$((total+n))
     if [[ "$n" -gt 0 ]]; then
-      printf "${GREEN}%-20s %-12s${NC}\n" "$user" "$n"
-      total=$((total+n))
+      printf "${GREEN}%-18s %-10s %-8s${NC}\n" "$user" "ONLINE" "$n/$limite"
+      online=$((online+1))
+    else
+      printf "%-18s ${RED}%-10s${NC} %-8s\n" "$user" "offline" "0/$limite"
     fi
   done < "$DB"
-  echo "-----------------------------------"
-  echo -e "${WHITE}Total conexiones: ${GREEN}$total${NC}"
+  echo "-------------------------------------"
+  echo -e "${WHITE}Usuarios online: ${GREEN}$online${WHITE}    Conexiones: ${GREEN}$total${NC}"
   pause
 }
 
