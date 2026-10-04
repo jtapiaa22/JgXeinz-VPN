@@ -1,0 +1,381 @@
+#!/bin/bash
+#==============================================================
+#  JgXeinz VPN  -  Panel de administracion
+#  Compatible: Ubuntu 22.04 / 24.04 / 26.04 - Debian 12 / 13
+#  Repo: https://github.com/TU_USUARIO/Script_VPS
+#==============================================================
+
+# ------------------- CONFIG (edita aca) -------------------
+PANEL_NAME="JgXeinz VPN"
+VERSION="1.0"
+UDPGW_PORT="7300"
+# ----------------------------------------------------------
+
+DIR="/etc/jgxeinz"
+DB="$DIR/users.db"
+PROXY="$DIR/proxy.py"
+BKP="$DIR/backup"
+
+RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
+BLUE='\033[1;34m'; CYAN='\033[1;36m'; WHITE='\033[1;37m'; NC='\033[0m'
+
+[[ $EUID -ne 0 ]] && { echo -e "${RED}Tenes que ejecutarlo como root (usa: sudo -i)${NC}"; exit 1; }
+mkdir -p "$DIR" "$BKP"; touch "$DB"
+
+pause(){ echo ""; read -rp "$(echo -e "${CYAN}Presiona ENTER para volver...${NC}")" _; }
+
+get_ip(){ curl -s --max-time 5 https://ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}'; }
+
+banner(){
+  clear
+  echo -e "${BLUE}===============================================${NC}"
+  if command -v figlet >/dev/null 2>&1; then
+    echo -e "${CYAN}$(figlet -w 80 -f small "$PANEL_NAME" 2>/dev/null || echo "   $PANEL_NAME")${NC}"
+  else
+    echo -e "${CYAN}                  $PANEL_NAME${NC}"
+  fi
+  echo -e "${BLUE}===============================================${NC}"
+}
+
+# --------------------------------------------------------------
+#  GESTION DE USUARIOS
+# --------------------------------------------------------------
+crear_usuario(){
+  banner; echo -e "${WHITE} CREAR USUARIO${NC}\n"
+  read -rp "Nombre de usuario: " user
+  [[ -z "$user" ]] && { echo -e "${RED}Usuario vacio${NC}"; pause; return; }
+  id "$user" &>/dev/null && { echo -e "${RED}Ese usuario ya existe${NC}"; pause; return; }
+  read -rp "Contrasena: " pass
+  [[ -z "$pass" ]] && { echo -e "${RED}Contrasena vacia${NC}"; pause; return; }
+  read -rp "Dias de validez: " dias
+  [[ ! "$dias" =~ ^[0-9]+$ ]] && { echo -e "${RED}Dias invalidos${NC}"; pause; return; }
+  read -rp "Limite de conexiones: " limite
+  [[ ! "$limite" =~ ^[0-9]+$ ]] && limite=1
+  local exp; exp=$(date -d "+$dias days" +%Y-%m-%d)
+  useradd -M -s /bin/false -e "$exp" "$user"
+  echo "$user:$pass" | chpasswd
+  sed -i "/^$user /d" "$DB"
+  echo "$user $limite" >> "$DB"
+  echo ""
+  echo -e "${GREEN}Usuario creado con exito${NC}"
+  echo -e "${WHITE}----------------------------------${NC}"
+  echo -e " Usuario : ${GREEN}$user${NC}"
+  echo -e " Clave   : ${GREEN}$pass${NC}"
+  echo -e " Vence   : ${GREEN}$exp${NC}"
+  echo -e " Limite  : ${GREEN}$limite${NC}"
+  echo -e " IP      : ${GREEN}$(get_ip)${NC}"
+  echo -e "${WHITE}----------------------------------${NC}"
+  pause
+}
+
+crear_teste(){
+  banner; echo -e "${WHITE} USUARIO DE PRUEBA${NC}\n"
+  read -rp "Minutos de validez [por defecto 30]: " mins
+  [[ ! "$mins" =~ ^[0-9]+$ ]] && mins=30
+  local user pass; user="test$(shuf -i 100-999 -n1)"; pass="$(shuf -i 1000-9999 -n1)"
+  useradd -M -s /bin/false "$user"
+  echo "$user:$pass" | chpasswd
+  sed -i "/^$user /d" "$DB"
+  echo "$user 1" >> "$DB"
+  # borrado automatico al vencer (no deja basura)
+  systemd-run --on-active="${mins}min" /bin/bash -c "userdel --force $user 2>/dev/null; sed -i '/^$user /d' $DB" >/dev/null 2>&1
+  echo ""
+  echo -e "${GREEN}Usuario de prueba creado${NC}"
+  echo -e "${WHITE}----------------------------------${NC}"
+  echo -e " Usuario : ${GREEN}$user${NC}"
+  echo -e " Clave   : ${GREEN}$pass${NC}"
+  echo -e " Dura    : ${GREEN}$mins minutos${NC}"
+  echo -e " IP      : ${GREEN}$(get_ip)${NC}"
+  echo -e "${WHITE}----------------------------------${NC}"
+  pause
+}
+
+remover_usuario(){
+  banner; echo -e "${WHITE} REMOVER USUARIO${NC}\n"
+  mapfile -t users < <(awk '{print $1}' "$DB")
+  [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios${NC}"; pause; return; }
+  local i=1; for u in "${users[@]}"; do echo -e "${YELLOW}[$i]${NC} $u"; ((i++)); done
+  echo ""; read -rp "Numero o nombre a remover: " sel
+  local user
+  if [[ "$sel" =~ ^[0-9]+$ ]]; then user="${users[$((sel-1))]}"; else user="$sel"; fi
+  [[ -z "$user" ]] && { echo -e "${RED}Seleccion invalida${NC}"; pause; return; }
+  pkill -u "$user" 2>/dev/null
+  userdel --force "$user" 2>/dev/null
+  sed -i "/^$user /d" "$DB"
+  echo -e "\n${GREEN}Usuario $user eliminado${NC}"; pause
+}
+
+monitor_online(){
+  banner; echo -e "${WHITE} MONITOR ONLINE${NC}\n"
+  printf "${WHITE}%-20s %-12s${NC}\n" "USUARIO" "CONEXIONES"
+  echo "-----------------------------------"
+  local total=0
+  while read -r user _; do
+    [[ -z "$user" ]] && continue
+    local n; n=$(ps -u "$user" 2>/dev/null | grep -c sshd)
+    if [[ "$n" -gt 0 ]]; then
+      printf "${GREEN}%-20s %-12s${NC}\n" "$user" "$n"
+      total=$((total+n))
+    fi
+  done < "$DB"
+  echo "-----------------------------------"
+  echo -e "${WHITE}Total conexiones: ${GREEN}$total${NC}"
+  pause
+}
+
+cambiar_fecha(){
+  banner; echo -e "${WHITE} CAMBIAR FECHA DE VENCIMIENTO${NC}\n"
+  read -rp "Usuario: " user
+  id "$user" &>/dev/null || { echo -e "${RED}Ese usuario no existe${NC}"; pause; return; }
+  read -rp "Nuevos dias de validez: " dias
+  [[ ! "$dias" =~ ^[0-9]+$ ]] && { echo -e "${RED}Dias invalidos${NC}"; pause; return; }
+  local exp; exp=$(date -d "+$dias days" +%Y-%m-%d)
+  chage -E "$exp" "$user"
+  echo -e "\n${GREEN}Nueva fecha de vencimiento: $exp${NC}"; pause
+}
+
+cambiar_limite(){
+  banner; echo -e "${WHITE} CAMBIAR LIMITE DE CONEXIONES${NC}\n"
+  read -rp "Usuario: " user
+  grep -q "^$user " "$DB" || { echo -e "${RED}Ese usuario no esta en la base${NC}"; pause; return; }
+  read -rp "Nuevo limite: " limite
+  [[ ! "$limite" =~ ^[0-9]+$ ]] && { echo -e "${RED}Limite invalido${NC}"; pause; return; }
+  sed -i "/^$user /d" "$DB"
+  echo "$user $limite" >> "$DB"
+  echo -e "\n${GREEN}Limite de $user ahora es $limite${NC}"
+  echo -e "${YELLOW}(El control real del limite se agrega en la etapa 2)${NC}"; pause
+}
+
+cambiar_senha(){
+  banner; echo -e "${WHITE} CAMBIAR CONTRASENA${NC}\n"
+  read -rp "Usuario: " user
+  id "$user" &>/dev/null || { echo -e "${RED}Ese usuario no existe${NC}"; pause; return; }
+  read -rp "Nueva contrasena: " pass
+  [[ -z "$pass" ]] && { echo -e "${RED}Contrasena vacia${NC}"; pause; return; }
+  echo "$user:$pass" | chpasswd
+  echo -e "\n${GREEN}Contrasena de $user actualizada${NC}"; pause
+}
+
+remover_expirados(){
+  banner; echo -e "${WHITE} REMOVER EXPIRADOS${NC}\n"
+  local hoy n=0; hoy=$(date +%s)
+  while read -r user _; do
+    [[ -z "$user" ]] && continue
+    local exp exp_s; exp=$(chage -l "$user" 2>/dev/null | grep -i "account expires" | cut -d: -f2- | xargs)
+    [[ "$exp" == "never" || -z "$exp" ]] && continue
+    exp_s=$(date -d "$exp" +%s 2>/dev/null) || continue
+    if (( exp_s < hoy )); then
+      pkill -u "$user" 2>/dev/null
+      userdel --force "$user" 2>/dev/null
+      sed -i "/^$user /d" "$DB"
+      echo -e "${RED}Eliminado: $user${NC}"; ((n++))
+    fi
+  done < "$DB"
+  echo -e "\n${GREEN}$n usuario(s) expirado(s) eliminado(s)${NC}"; pause
+}
+
+reporte(){
+  banner; echo -e "${WHITE} REPORTE DE USUARIOS${NC}\n"
+  printf "${WHITE}%-16s %-12s %-7s %-6s${NC}\n" "USUARIO" "VENCE" "DIAS" "LIMITE"
+  echo "-------------------------------------------"
+  local hoy; hoy=$(date +%s)
+  while read -r user limite; do
+    [[ -z "$user" ]] && continue
+    local exp exp_s dias
+    exp=$(chage -l "$user" 2>/dev/null | grep -i "account expires" | cut -d: -f2- | xargs)
+    if [[ "$exp" == "never" || -z "$exp" ]]; then
+      dias="-"; exp="nunca"
+    else
+      exp_s=$(date -d "$exp" +%s 2>/dev/null)
+      dias=$(( (exp_s - hoy) / 86400 ))
+    fi
+    printf "%-16s %-12s %-7s %-6s\n" "$user" "$exp" "$dias" "$limite"
+  done < "$DB"
+  pause
+}
+
+# --------------------------------------------------------------
+#  MODO DE CONEXION
+# --------------------------------------------------------------
+ws_on(){
+  local p="$1"
+  cat > /etc/systemd/system/jgx-ws@.service <<EOF
+[Unit]
+Description=JgXeinz WebSocket proxy %i
+After=network.target
+[Service]
+ExecStart=/usr/bin/python3 $PROXY %i
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now jgx-ws@"$p" >/dev/null 2>&1
+  sleep 1
+  if ss -tlnp 2>/dev/null | grep -q ":$p "; then
+    echo -e "${GREEN}WebSocket activo en el puerto $p${NC}"
+    echo -e "${YELLOW}Acordate de abrir el puerto $p en el grupo de seguridad de AWS${NC}"
+  else
+    echo -e "${RED}No se pudo activar. Puede que el puerto $p ya este en uso.${NC}"
+  fi
+}
+
+badvpn_on(){
+  if ! command -v badvpn-udpgw >/dev/null 2>&1; then
+    echo -e "${YELLOW}Instalando badvpn...${NC}"
+    apt-get install -y badvpn >/dev/null 2>&1
+  fi
+  command -v badvpn-udpgw >/dev/null 2>&1 || { echo -e "${RED}No se pudo instalar badvpn${NC}"; return; }
+  cat > /etc/systemd/system/jgx-badvpn.service <<EOF
+[Unit]
+Description=JgXeinz BadVPN UDPGW
+After=network.target
+[Service]
+ExecStart=/usr/bin/badvpn-udpgw --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 500 --max-connections-for-client 10
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now jgx-badvpn >/dev/null 2>&1
+  sleep 1
+  if pgrep -x badvpn-udpgw >/dev/null; then
+    echo -e "${GREEN}BadVPN activo en 127.0.0.1:$UDPGW_PORT${NC}"
+    echo -e "${YELLOW}Activa UDPGW en HTTP Custom con el puerto $UDPGW_PORT (asi anda la voz/UDP)${NC}"
+  else
+    echo -e "${RED}No se pudo activar BadVPN${NC}"
+  fi
+}
+
+modo_conexion(){
+  while true; do
+    banner
+    local ssh_ports ws_cnt bad_st
+    ssh_ports=$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
+    [[ -z "$ssh_ports" ]] && ssh_ports="22"
+    ws_cnt=$(ss -tlnp 2>/dev/null | grep -c python3)
+    pgrep -x badvpn-udpgw >/dev/null && bad_st="${GREEN}ON${NC}" || bad_st="${RED}OFF${NC}"
+    local ws_st; [[ "$ws_cnt" -gt 0 ]] && ws_st="${GREEN}ON${NC}" || ws_st="${RED}OFF${NC}"
+    echo -e "${WHITE} MODO DE CONEXION${NC}\n"
+    echo -e " SSH   puertos : ${GREEN}$ssh_ports${NC}"
+    echo -e " WebSocket     : $ws_st"
+    echo -e " BadVPN UDPGW  : $bad_st"
+    echo ""
+    echo -e "${YELLOW}[1]${NC} Agregar puerto SSH"
+    echo -e "${YELLOW}[2]${NC} Quitar puerto SSH"
+    echo -e "${YELLOW}[3]${NC} Activar WebSocket en un puerto"
+    echo -e "${YELLOW}[4]${NC} Desactivar un WebSocket"
+    echo -e "${YELLOW}[5]${NC} Activar BadVPN (UDPGW) para voz/UDP"
+    echo -e "${YELLOW}[6]${NC} Desactivar BadVPN"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""
+    read -rp "Opcion: " op
+    case $op in
+      1) read -rp "Puerto SSH a agregar: " p
+         [[ "$p" =~ ^[0-9]+$ ]] && { echo "Port $p" >> /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; echo -e "${GREEN}Puerto $p agregado. Abrilo tambien en AWS.${NC}"; } || echo -e "${RED}Puerto invalido${NC}"
+         pause;;
+      2) read -rp "Puerto SSH a quitar: " p
+         sed -i "/^Port $p\$/d" /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+         echo -e "${GREEN}Listo${NC}"; pause;;
+      3) read -rp "Puerto para WebSocket: " p
+         [[ "$p" =~ ^[0-9]+$ ]] && ws_on "$p" || echo -e "${RED}Puerto invalido${NC}"; pause;;
+      4) read -rp "Puerto WebSocket a desactivar: " p
+         systemctl disable --now jgx-ws@"$p" >/dev/null 2>&1; echo -e "${GREEN}Desactivado${NC}"; pause;;
+      5) badvpn_on; pause;;
+      6) systemctl disable --now jgx-badvpn >/dev/null 2>&1; echo -e "${GREEN}BadVPN desactivado${NC}"; pause;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
+  done
+}
+
+# --------------------------------------------------------------
+#  INFO Y BACKUP
+# --------------------------------------------------------------
+info_vps(){
+  banner; echo -e "${WHITE} INFO DEL VPS${NC}\n"
+  echo -e " Sistema  : ${GREEN}$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")${NC}"
+  echo -e " Uptime   : ${GREEN}$(uptime -p 2>/dev/null)${NC}"
+  echo -e " CPU      : ${GREEN}$(nproc) nucleo(s)${NC}"
+  echo -e " RAM      : ${GREEN}$(free -h | awk '/Mem/{print $3" / "$2}')${NC}"
+  echo -e " Disco    : ${GREEN}$(df -h / | awk 'NR==2{print $3" / "$2" ("$5")"}')${NC}"
+  echo -e " IP       : ${GREEN}$(get_ip)${NC}"
+  echo -e " Usuarios : ${GREEN}$(grep -c . "$DB")${NC}"
+  pause
+}
+
+backup(){
+  while true; do
+    banner; echo -e "${WHITE} BACKUP DE USUARIOS${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Crear backup"
+    echo -e "${YELLOW}[2]${NC} Restaurar backup"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " op
+    case $op in
+      1)
+        local f tmp; f="$BKP/backup_$(date +%Y%m%d_%H%M%S).tar.gz"; tmp=$(mktemp -d)
+        cp "$DB" "$tmp/users.db"; : > "$tmp/passwd.bak"; : > "$tmp/shadow.bak"
+        while read -r user _; do
+          [[ -z "$user" ]] && continue
+          grep "^$user:" /etc/passwd >> "$tmp/passwd.bak"
+          grep "^$user:" /etc/shadow >> "$tmp/shadow.bak"
+        done < "$DB"
+        tar -czf "$f" -C "$tmp" users.db passwd.bak shadow.bak
+        rm -rf "$tmp"
+        echo -e "\n${GREEN}Backup creado:${NC}\n$f"; pause;;
+      2)
+        mapfile -t files < <(ls -1 "$BKP"/*.tar.gz 2>/dev/null)
+        [[ ${#files[@]} -eq 0 ]] && { echo -e "${RED}No hay backups${NC}"; pause; continue; }
+        local i=1; for ff in "${files[@]}"; do echo -e "${YELLOW}[$i]${NC} $(basename "$ff")"; ((i++)); done
+        echo ""; read -rp "Numero a restaurar: " s
+        local file; file="${files[$((s-1))]}"; [[ -z "$file" ]] && { echo -e "${RED}Invalido${NC}"; pause; continue; }
+        local tmp; tmp=$(mktemp -d); tar -xzf "$file" -C "$tmp"
+        while IFS=: read -r user _; do
+          [[ -z "$user" ]] && continue
+          id "$user" &>/dev/null || useradd -M -s /bin/false "$user"
+        done < "$tmp/passwd.bak"
+        while IFS=: read -r user hash _; do
+          [[ -z "$user" ]] && continue
+          usermod -p "$hash" "$user" 2>/dev/null
+        done < "$tmp/shadow.bak"
+        cp "$tmp/users.db" "$DB"; rm -rf "$tmp"
+        echo -e "\n${GREEN}Backup restaurado${NC}"; pause;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
+  done
+}
+
+# --------------------------------------------------------------
+#  MENU PRINCIPAL
+# --------------------------------------------------------------
+while true; do
+  banner
+  echo -e "${WHITE} IP: ${GREEN}$(get_ip)${WHITE}    Usuarios: ${GREEN}$(grep -c . "$DB")${WHITE}    v$VERSION${NC}"
+  echo -e "${BLUE}-----------------------------------------------${NC}"
+  echo -e "${YELLOW}[01]${NC} Crear usuario       ${YELLOW}[08]${NC} Remover expirados"
+  echo -e "${YELLOW}[02]${NC} Usuario de prueba   ${YELLOW}[09]${NC} Reporte de usuarios"
+  echo -e "${YELLOW}[03]${NC} Remover usuario     ${YELLOW}[10]${NC} Modo de conexion"
+  echo -e "${YELLOW}[04]${NC} Monitor online      ${YELLOW}[11]${NC} Info del VPS"
+  echo -e "${YELLOW}[05]${NC} Cambiar fecha       ${YELLOW}[12]${NC} Backup"
+  echo -e "${YELLOW}[06]${NC} Cambiar limite      ${YELLOW}[00]${NC} Salir"
+  echo -e "${YELLOW}[07]${NC} Cambiar contrasena"
+  echo -e "${BLUE}-----------------------------------------------${NC}"
+  read -rp "Opcion: " opt
+  case $opt in
+    1|01) crear_usuario;;
+    2|02) crear_teste;;
+    3|03) remover_usuario;;
+    4|04) monitor_online;;
+    5|05) cambiar_fecha;;
+    6|06) cambiar_limite;;
+    7|07) cambiar_senha;;
+    8|08) remover_expirados;;
+    9|09) reporte;;
+    10) modo_conexion;;
+    11) info_vps;;
+    12) backup;;
+    0|00) clear; exit 0;;
+    *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+  esac
+done
