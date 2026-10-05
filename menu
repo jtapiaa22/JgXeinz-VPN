@@ -2,12 +2,12 @@
 #==============================================================
 #  JgXeinz VPN  -  Panel de administracion
 #  Compatible: Ubuntu 22.04 / 24.04 / 26.04 - Debian 12 / 13
-#  Repo: https://github.com/TU_USUARIO/Script_VPS
+#  Repo: https://github.com/jtapiaa22/JgXeinz-VPN
 #==============================================================
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.0"
+VERSION="1.1"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -16,16 +16,45 @@ DIR="/etc/jgxeinz"
 DB="$DIR/users.db"
 PROXY="$DIR/proxy.py"
 BKP="$DIR/backup"
+VPN_GROUP="$(cat "$DIR/group" 2>/dev/null)"; [[ -z "$VPN_GROUP" ]] && VPN_GROUP="jgxvpn"
 
 RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
 BLUE='\033[1;34m'; CYAN='\033[1;36m'; WHITE='\033[1;37m'; NC='\033[0m'
 
 [[ $EUID -ne 0 ]] && { echo -e "${RED}Tenes que ejecutarlo como root (usa: sudo -i)${NC}"; exit 1; }
 mkdir -p "$DIR" "$BKP"; touch "$DB"
+getent group "$VPN_GROUP" >/dev/null 2>&1 || groupadd "$VPN_GROUP"
 
 pause(){ echo ""; read -rp "$(echo -e "${CYAN}Presiona ENTER para volver...${NC}")" _; }
 
-get_ip(){ curl -s --max-time 5 https://ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}'; }
+# IP cacheada: evita un curl en cada redibujado (monitor/header)
+get_ip(){
+  local cache="$DIR/ip" ip now mtime
+  now=$(date +%s)
+  if [[ -f "$cache" ]]; then
+    mtime=$(stat -c %Y "$cache" 2>/dev/null || echo 0)
+    if (( now - mtime < 3600 )); then cat "$cache"; return; fi
+  fi
+  ip=$(curl -s --max-time 5 https://ipv4.icanhazip.com 2>/dev/null || hostname -I | awk '{print $1}')
+  echo "$ip" > "$cache"
+  echo "$ip"
+}
+
+# nombre de usuario valido para linux (sin inyectar en sed/useradd)
+valid_user(){ [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
+
+# usuarios del sistema que NUNCA se tocan (root, admin de debian, ubuntu de aws, etc.)
+is_system_user(){
+  case "$1" in
+    root|ubuntu|admin|debian|ec2-user|nobody|daemon|bin|sys|sync) return 0;;
+  esac
+  # cualquiera que no este en el grupo del panel se considera del sistema
+  id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$VPN_GROUP" || return 0
+  return 1
+}
+
+# cuenta conexiones activas de un usuario (sshd + dropbear)
+conexiones(){ ps -u "$1" 2>/dev/null | grep -cE 'sshd|dropbear'; }
 
 banner(){
   clear
@@ -47,7 +76,8 @@ gen_cuenta(){
   local ip sshp dropp wsp ovpnp sslp badp dias
   ip=$(get_ip)
   local host; host=$(cat "$DIR/domain" 2>/dev/null); [[ -z "$host" ]] && host="$ip"
-  sshp=$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | paste -sd, -)
+  sshp=$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | paste -sd, -)
+  [[ -z "$sshp" ]] && sshp="22"
   systemctl is-active --quiet dropbear 2>/dev/null && dropp=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
   wsp=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | paste -sd, -)
   systemctl is-active --quiet openvpn@server 2>/dev/null && ovpnp=$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')
@@ -82,13 +112,20 @@ gen_cuenta(){
     done
     if [[ -n "$badp" ]]; then
       echo "----------------------------------------------"
-      echo " UDP CUSTOM  :"
-      echo "   $host:1-65535@$user:$pass"
+      echo " BADVPN (voz/UDP) : va por dentro del tunel SSH."
+      echo "   En HTTP Custom activa 'UDPGW' con el puerto $badp."
     fi
     echo "=============================================="
   } | tee "$f"
   chmod 600 "$f" 2>/dev/null
   echo -e "\n${YELLOW}(Guardado; se vuelve a ver con la opcion 16)${NC}"
+}
+
+# agrega la regla de medicion de trafico para un usuario (idempotente)
+add_traffic_rule(){
+  local uid; uid=$(id -u "$1" 2>/dev/null) || return
+  iptables -C OUTPUT -m owner --uid-owner "$uid" 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner "$uid"
+  netfilter-persistent save >/dev/null 2>&1
 }
 
 datos_cuenta(){
@@ -108,6 +145,7 @@ crear_usuario(){
   banner; echo -e "${WHITE} CREAR USUARIO${NC}\n"
   read -rp "Nombre de usuario: " user
   [[ -z "$user" ]] && { echo -e "${RED}Usuario vacio${NC}"; pause; return; }
+  valid_user "$user" || { echo -e "${RED}Nombre invalido. Usa minusculas, numeros, '-' o '_' (sin espacios).${NC}"; pause; return; }
   id "$user" &>/dev/null && { echo -e "${RED}Ese usuario ya existe${NC}"; pause; return; }
   read -rp "Contrasena: " pass
   [[ -z "$pass" ]] && { echo -e "${RED}Contrasena vacia${NC}"; pause; return; }
@@ -116,10 +154,13 @@ crear_usuario(){
   read -rp "Limite de conexiones: " limite
   [[ ! "$limite" =~ ^[0-9]+$ ]] && limite=1
   local exp; exp=$(date -d "+$dias days" +%Y-%m-%d)
-  useradd -M -s /bin/false -e "$exp" "$user"
+  if ! useradd -M -s /bin/false -e "$exp" -G "$VPN_GROUP" "$user"; then
+    echo -e "\n${RED}No se pudo crear el usuario (useradd fallo).${NC}"; pause; return
+  fi
   echo "$user:$pass" | chpasswd
   sed -i "/^$user /d" "$DB"
   echo "$user $limite" >> "$DB"
+  add_traffic_rule "$user"
   echo ""
   echo -e "${GREEN}Usuario creado con exito${NC}\n"
   gen_cuenta "$user" "$pass" "$exp" "$limite"
@@ -131,12 +172,17 @@ crear_teste(){
   read -rp "Minutos de validez [por defecto 30]: " mins
   [[ ! "$mins" =~ ^[0-9]+$ ]] && mins=30
   local user pass; user="test$(shuf -i 100-999 -n1)"; pass="$(shuf -i 1000-9999 -n1)"
-  useradd -M -s /bin/false "$user"
+  if ! useradd -M -s /bin/false -G "$VPN_GROUP" "$user"; then
+    echo -e "${RED}No se pudo crear el usuario de prueba${NC}"; pause; return
+  fi
   echo "$user:$pass" | chpasswd
   sed -i "/^$user /d" "$DB"
   echo "$user 1" >> "$DB"
-  # borrado automatico al vencer (no deja basura)
-  systemd-run --on-active="${mins}min" /bin/bash -c "userdel --force $user 2>/dev/null; sed -i '/^$user /d' $DB" >/dev/null 2>&1
+  add_traffic_rule "$user"
+  # borrado automatico al vencer: corta la sesion y limpia la DB.
+  # el --on-active es transitorio (no sobrevive reboot); el barrido diario
+  # de 'remover_expirados' lo cubre como red de seguridad.
+  systemd-run --on-active="${mins}min" /bin/bash -c "pkill -u $user 2>/dev/null; userdel --force $user 2>/dev/null; sed -i '/^$user /d' $DB" >/dev/null 2>&1
   echo ""
   echo -e "${GREEN}Usuario de prueba creado${NC}"
   echo -e "${WHITE}----------------------------------${NC}"
@@ -150,14 +196,14 @@ crear_teste(){
 
 remover_usuario(){
   banner; echo -e "${WHITE} REMOVER USUARIO${NC}\n"
-  mapfile -t users < <(awk -F: '$3>=1000 && $1!="nobody" && $1!="ubuntu" {print $1}' /etc/passwd)
-  [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios${NC}"; pause; return; }
+  mapfile -t users < <(getent group "$VPN_GROUP" | awk -F: '{print $4}' | tr ',' '\n' | grep -v '^$')
+  [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios del panel${NC}"; pause; return; }
   local i=1
   for u in "${users[@]}"; do
     if grep -q "^$u " "$DB"; then
       echo -e "${YELLOW}[$i]${NC} $u"
     else
-      echo -e "${YELLOW}[$i]${NC} $u ${CYAN}(externo)${NC}"
+      echo -e "${YELLOW}[$i]${NC} $u ${CYAN}(sin DB)${NC}"
     fi
     ((i++))
   done
@@ -165,10 +211,13 @@ remover_usuario(){
   local user
   if [[ "$sel" =~ ^[0-9]+$ ]]; then user="${users[$((sel-1))]}"; else user="$sel"; fi
   [[ -z "$user" ]] && { echo -e "${RED}Seleccion invalida${NC}"; pause; return; }
-  [[ "$user" == "ubuntu" || "$user" == "root" ]] && { echo -e "${RED}Ese usuario no se puede borrar (es del sistema)${NC}"; pause; return; }
+  if is_system_user "$user"; then
+    echo -e "${RED}Ese usuario es del sistema y no se puede borrar${NC}"; pause; return
+  fi
   pkill -u "$user" 2>/dev/null
   userdel --force "$user" 2>/dev/null
   sed -i "/^$user /d" "$DB"
+  rm -f "$DIR/cuentas/$user.txt" 2>/dev/null
   echo -e "\n${GREEN}Usuario $user eliminado${NC}"; pause
 }
 
@@ -184,7 +233,7 @@ monitor_online(){
       [[ -z "$user" ]] && continue
       local limite n uid mb
       limite=$(awk -v u="$user" '$1==u{print $2}' "$DB"); [[ -z "$limite" ]] && limite="-"
-      n=$(ps -u "$user" 2>/dev/null | grep -c sshd)
+      n=$(conexiones "$user")
       uid=$(id -u "$user" 2>/dev/null)
       mb=$(echo "$ipt" | awk -v p="owner UID match $uid" '$0 ~ p {s+=$2} END{printf "%d", (s+0)/1048576}')
       if [[ "$n" -gt 0 ]]; then
@@ -193,12 +242,24 @@ monitor_online(){
       else
         printf " %-15s ${RED}%-9s${NC} %-7s %-8s\n" "$user" "offline" "0/$limite" "${mb}MB"
       fi
-    done < <(awk -F: '$3>=1000 && $1!="nobody" && $1!="ubuntu" {print $1}' /etc/passwd)
+    done < <(getent group "$VPN_GROUP" | awk -F: '{print $4}' | tr ',' '\n' | grep -v '^$')
     echo -e "${BLUE}-----------------------------------------------${NC}"
     echo -e " ${WHITE}Online: ${GREEN}$on${NC}   ${YELLOW}(se actualiza cada 3s - apreta 'q' para salir)${NC}"
     read -t 3 -n 1 -s k
     [[ "$k" == "q" ]] && break
   done
+}
+
+# regenera el archivo cuentas/ tras cambiar pass/fecha/limite
+regen_cuenta(){
+  local user="$1"
+  [[ -f "$DIR/cuentas/$user.txt" ]] || return
+  local pass exp limite
+  pass=$(grep -i 'Contrasena' "$DIR/cuentas/$user.txt" | head -1 | cut -d: -f2- | xargs)
+  limite=$(awk -v u="$user" '$1==u{print $2}' "$DB")
+  exp=$(chage -l "$user" 2>/dev/null | grep -i "account expires" | cut -d: -f2- | xargs)
+  [[ "$exp" == "never" || -z "$exp" ]] && exp="nunca" || exp=$(date -d "$exp" +%Y-%m-%d 2>/dev/null)
+  gen_cuenta "$user" "$pass" "$exp" "$limite" >/dev/null
 }
 
 cambiar_fecha(){
@@ -209,7 +270,29 @@ cambiar_fecha(){
   [[ ! "$dias" =~ ^[0-9]+$ ]] && { echo -e "${RED}Dias invalidos${NC}"; pause; return; }
   local exp; exp=$(date -d "+$dias days" +%Y-%m-%d)
   chage -E "$exp" "$user"
+  regen_cuenta "$user"
   echo -e "\n${GREEN}Nueva fecha de vencimiento: $exp${NC}"; pause
+}
+
+renovar_usuario(){
+  banner; echo -e "${WHITE} RENOVAR USUARIO (sumar dias)${NC}\n"
+  read -rp "Usuario: " user
+  id "$user" &>/dev/null || { echo -e "${RED}Ese usuario no existe${NC}"; pause; return; }
+  read -rp "Dias a sumar: " dias
+  [[ ! "$dias" =~ ^[0-9]+$ ]] && { echo -e "${RED}Dias invalidos${NC}"; pause; return; }
+  local actual base exp
+  actual=$(chage -l "$user" 2>/dev/null | grep -i "account expires" | cut -d: -f2- | xargs)
+  if [[ "$actual" == "never" || -z "$actual" ]]; then
+    base=$(date +%s)
+  else
+    base=$(date -d "$actual" +%s 2>/dev/null)
+    # si ya vencio, suma desde hoy
+    (( base < $(date +%s) )) && base=$(date +%s)
+  fi
+  exp=$(date -d "@$(( base + dias*86400 ))" +%Y-%m-%d)
+  chage -E "$exp" "$user"
+  regen_cuenta "$user"
+  echo -e "\n${GREEN}Nuevo vencimiento de $user: $exp${NC}"; pause
 }
 
 cambiar_limite(){
@@ -220,8 +303,9 @@ cambiar_limite(){
   [[ ! "$limite" =~ ^[0-9]+$ ]] && { echo -e "${RED}Limite invalido${NC}"; pause; return; }
   sed -i "/^$user /d" "$DB"
   echo "$user $limite" >> "$DB"
+  regen_cuenta "$user"
   echo -e "\n${GREEN}Limite de $user ahora es $limite${NC}"
-  echo -e "${YELLOW}(El control real del limite se agrega en la etapa 2)${NC}"; pause
+  echo -e "${YELLOW}(El corte real lo aplica el Limiter, opcion 14)${NC}"; pause
 }
 
 cambiar_senha(){
@@ -231,6 +315,7 @@ cambiar_senha(){
   read -rp "Nueva contrasena: " pass
   [[ -z "$pass" ]] && { echo -e "${RED}Contrasena vacia${NC}"; pause; return; }
   echo "$user:$pass" | chpasswd
+  regen_cuenta "$user"
   echo -e "\n${GREEN}Contrasena de $user actualizada${NC}"; pause
 }
 
@@ -246,6 +331,7 @@ remover_expirados(){
       pkill -u "$user" 2>/dev/null
       userdel --force "$user" 2>/dev/null
       sed -i "/^$user /d" "$DB"
+      rm -f "$DIR/cuentas/$user.txt" 2>/dev/null
       echo -e "${RED}Eliminado: $user${NC}"; ((n++))
     fi
   done < "$DB"
@@ -327,16 +413,28 @@ EOF
 ssh_ports_mgr(){
   while true; do
     banner; echo -e "${WHITE} OPENSSH${NC}\n"
-    echo -e " Puertos SSH: ${GREEN}$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}\n"
+    echo -e " Puertos SSH: ${GREEN}$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}\n"
     echo -e "${YELLOW}[1]${NC} Agregar puerto"
     echo -e "${YELLOW}[2]${NC} Quitar puerto"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
       1) read -rp "Puerto a agregar: " p
-         [[ "$p" =~ ^[0-9]+$ ]] && { echo "Port $p" >> /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; echo -e "${GREEN}Agregado. Abrilo en AWS.${NC}"; } || echo -e "${RED}Invalido${NC}"; pause;;
+         if [[ "$p" =~ ^[0-9]+$ ]]; then
+           # garantizamos que el 22 quede explicito antes de sumar otro,
+           # para no quedarnos sin el puerto por defecto
+           grep -qE '^[[:space:]]*Port[[:space:]]+22([[:space:]]|$)' /etc/ssh/sshd_config || echo "Port 22" >> /etc/ssh/sshd_config
+           grep -qE "^[[:space:]]*Port[[:space:]]+$p([[:space:]]|\$)" /etc/ssh/sshd_config || echo "Port $p" >> /etc/ssh/sshd_config
+           systemctl restart ssh.socket 2>/dev/null
+           systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+           echo -e "${GREEN}Agregado. Abrilo en AWS.${NC}"
+         else echo -e "${RED}Invalido${NC}"; fi; pause;;
       2) read -rp "Puerto a quitar: " p
-         sed -i "/^Port $p\$/d" /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; echo -e "${GREEN}Listo${NC}"; pause;;
+         if [[ "$p" == "22" ]]; then echo -e "${RED}El 22 no se quita (es tu acceso de respaldo).${NC}"; pause; continue; fi
+         sed -i "/^[[:space:]]*Port[[:space:]]\+$p\$/d" /etc/ssh/sshd_config
+         systemctl restart ssh.socket 2>/dev/null
+         systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+         echo -e "${GREEN}Listo${NC}"; pause;;
       0) break;;
     esac
   done
@@ -472,7 +570,7 @@ openvpn_install(){
   local PORT="$1"
   echo -e "${YELLOW}Instalando paquetes...${NC}"
   apt-get update -y >/dev/null 2>&1
-  apt-get install -y openvpn easy-rsa iptables >/dev/null 2>&1
+  apt-get install -y openvpn easy-rsa iptables openvpn-auth-pam >/dev/null 2>&1
   local E=/etc/openvpn/easy-rsa
   rm -rf "$E"
   make-cadir "$E" >/dev/null 2>&1 || { mkdir -p "$E"; cp -r /usr/share/easy-rsa/* "$E"/ 2>/dev/null; }
@@ -481,10 +579,14 @@ openvpn_install(){
   ./easyrsa init-pki >/dev/null 2>&1
   ./easyrsa --batch build-ca nopass >/dev/null 2>&1
   ./easyrsa --batch build-server-full server nopass >/dev/null 2>&1
-  ./easyrsa --batch build-client-full jgxeinz nopass >/dev/null 2>&1
   ./easyrsa gen-dh >/dev/null 2>&1
   openvpn --genkey secret /etc/openvpn/ta.key >/dev/null 2>&1
   cp pki/ca.crt pki/issued/server.crt pki/private/server.key pki/dh.pem /etc/openvpn/ 2>/dev/null
+
+  # ubicacion del plugin de auth-pam (cambia segun arquitectura/distro)
+  local PAM_PLUGIN
+  PAM_PLUGIN=$(find /usr/lib /usr/lib64 -name 'openvpn-plugin-auth-pam.so' 2>/dev/null | head -1)
+
   cat > /etc/openvpn/server.conf <<EOF
 port $PORT
 proto tcp
@@ -509,6 +611,24 @@ group nogroup
 status /var/log/openvpn-status.log
 verb 3
 EOF
+
+  # autenticacion por usuario/contrasena usando los mismos usuarios del panel (PAM)
+  if [[ -n "$PAM_PLUGIN" ]]; then
+    cat >> /etc/openvpn/server.conf <<EOF
+plugin $PAM_PLUGIN login
+verify-client-cert none
+username-as-common-name
+EOF
+    # perfil PAM que valida contra las cuentas del sistema
+    cat > /etc/pam.d/openvpn <<'EOF'
+auth    required    pam_unix.so shadow nodelay
+account required    pam_unix.so
+EOF
+    echo -e "${GREEN}OpenVPN usara los usuarios del panel (usuario + contrasena).${NC}"
+  else
+    echo -e "${YELLOW}No encontre el plugin auth-pam; OpenVPN quedara con certificado unico.${NC}"
+  fi
+
   echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-jgx-ovpn.conf
   sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
   local nic; nic=$(ip route | awk '/default/{print $5; exit}')
@@ -520,6 +640,8 @@ EOF
   systemctl restart openvpn@server >/dev/null 2>&1
   sleep 2
   local ip; ip=$(get_ip)
+
+  # perfil de cliente: pide usuario y contrasena (sin cert de cliente)
   cat > /root/jgxeinz-ovpn.ovpn <<EOF
 client
 dev tun
@@ -530,6 +652,7 @@ nobind
 persist-key
 persist-tun
 remote-cert-tls server
+auth-user-pass
 data-ciphers AES-256-GCM:AES-128-GCM
 data-ciphers-fallback AES-256-CBC
 auth-nocache
@@ -538,12 +661,6 @@ key-direction 1
 <ca>
 $(cat /etc/openvpn/ca.crt)
 </ca>
-<cert>
-$(cat "$E/pki/issued/jgxeinz.crt")
-</cert>
-<key>
-$(cat "$E/pki/private/jgxeinz.key")
-</key>
 <tls-auth>
 $(cat /etc/openvpn/ta.key)
 </tls-auth>
@@ -551,6 +668,7 @@ EOF
   if systemctl is-active --quiet openvpn@server; then
     echo -e "\n${GREEN}OpenVPN activo en el puerto $PORT (tcp). Abrilo en AWS.${NC}"
     echo -e "${GREEN}Config del cliente: /root/jgxeinz-ovpn.ovpn${NC}"
+    echo -e "${YELLOW}El cliente entra con el usuario y la contrasena del panel.${NC}"
   else
     echo -e "\n${RED}No se pudo iniciar. Revisa: journalctl -u openvpn@server${NC}"
   fi
@@ -568,6 +686,7 @@ openvpn_mgr(){
     case $o in
       1) echo -e "\n${GREEN}Archivo:${NC} /root/jgxeinz-ovpn.ovpn"
          echo -e "${YELLOW}Pasalo a tu dispositivo y abrilo con la app OpenVPN.${NC}"
+         echo -e "${YELLOW}Al conectar te va a pedir usuario y contrasena (los del panel).${NC}"
          echo -e "Para verlo en pantalla: ${CYAN}cat /root/jgxeinz-ovpn.ovpn${NC}"; pause;;
       2) read -rp "Seguro que queres remover OpenVPN? [s/n]: " r
          [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now openvpn@server >/dev/null 2>&1; apt-get remove --purge -y openvpn >/dev/null 2>&1; rm -rf /etc/openvpn/easy-rsa /etc/openvpn/server.conf /etc/openvpn/ca.crt /etc/openvpn/server.crt /etc/openvpn/server.key /etc/openvpn/dh.pem /etc/openvpn/ta.key /root/jgxeinz-ovpn.ovpn; echo -e "${GREEN}OpenVPN removido${NC}"; }
@@ -576,7 +695,7 @@ openvpn_mgr(){
     esac
   else
     echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
-    echo -e "Instala un servidor OpenVPN (TCP) y genera el .ovpn del cliente."
+    echo -e "Instala OpenVPN (TCP). Los clientes entran con usuario/contrasena del panel."
     read -rp "Puerto para OpenVPN [1194]: " p
     [[ -z "$p" ]] && p=1194
     [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; return; }
@@ -598,7 +717,7 @@ modo_conexion(){
     systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}ON${NC}" || st_sslh="${RED}OFF${NC}"
     pgrep -x badvpn-udpgw >/dev/null && st_bad="${GREEN}ON${NC}" || st_bad="${RED}OFF${NC}"
     echo -e "${WHITE} MODO DE CONEXION${NC}"
-    echo -e " SSH: ${GREEN}$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
+    echo -e " SSH: ${GREEN}$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
     echo -e "${BLUE}-----------------------------------------------${NC}"
     echo -e "${YELLOW}[01]${NC} OPENSSH             $st_ssh"
     echo -e "${YELLOW}[02]${NC} SQUID PROXY         $st_squid"
@@ -616,7 +735,7 @@ modo_conexion(){
     case $op in
       1|01) ssh_ports_mgr;;
       2|02) squid_mgr;;
-      3|03) dropbear;;
+      3|03) dropbear_mgr;;
       4|04) openvpn_mgr;;
       5|05) ws_mgr;;
       6|06) ssl_tunnel_mgr;;
@@ -670,16 +789,22 @@ backup(){
         echo ""; read -rp "Numero a restaurar: " s
         local file; file="${files[$((s-1))]}"; [[ -z "$file" ]] && { echo -e "${RED}Invalido${NC}"; pause; continue; }
         local tmp; tmp=$(mktemp -d); tar -xzf "$file" -C "$tmp"
+        # recrear usuarios en el grupo del panel
         while IFS=: read -r user _; do
           [[ -z "$user" ]] && continue
-          id "$user" &>/dev/null || useradd -M -s /bin/false "$user"
+          id "$user" &>/dev/null || useradd -M -s /bin/false -G "$VPN_GROUP" "$user"
         done < "$tmp/passwd.bak"
-        while IFS=: read -r user hash _; do
+        # restaurar hash de contrasena Y fecha de vencimiento (campo 8 de shadow)
+        while IFS=: read -r user hash d3 d4 d5 d6 d7 d8 _; do
           [[ -z "$user" ]] && continue
           usermod -p "$hash" "$user" 2>/dev/null
+          if [[ -n "$d8" && "$d8" =~ ^[0-9]+$ ]]; then
+            # campo 8 = dias desde epoch hasta el vencimiento
+            chage -E "$(date -d "@$(( d8 * 86400 ))" +%Y-%m-%d)" "$user" 2>/dev/null
+          fi
         done < "$tmp/shadow.bak"
         cp "$tmp/users.db" "$DB"; rm -rf "$tmp"
-        echo -e "\n${GREEN}Backup restaurado${NC}"; pause;;
+        echo -e "\n${GREEN}Backup restaurado (incluye fechas de vencimiento)${NC}"; pause;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
@@ -708,7 +833,7 @@ EOF
 
 editar_banner(){
   banner; echo -e "${WHITE} BANNER (mensaje al conectar)${NC}\n"
-  local FS=$' '   # espacio invisible de ancho normal (no lo junta HTTP Custom)
+  local FS=$' '   # espacio invisible de ancho normal (no lo junta HTTP Custom)
   if [[ -f "$DIR/banner.txt" ]]; then
     # mostrar el actual con los invisibles convertidos a espacio real, para que se lea
     echo -e "Banner actual:\n${CYAN}$(sed "s/$FS/ /g" "$DIR/banner.txt")${NC}\n"
@@ -731,11 +856,11 @@ editar_banner(){
   echo -e "\n${GREEN}Banner actualizado y aplicado.${NC} Reconectate para verlo."; pause
 }
 
-dropbear(){
+dropbear_mgr(){
   while true; do
     banner; echo -e "${WHITE} DROPBEAR (otro servidor SSH)${NC}\n"
     if systemctl is-active --quiet dropbear 2>/dev/null; then
-      local dp; dp=$(ss -tlnp 2>/dev/null | grep -o 'dropbear.*' >/dev/null; grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
+      local dp; dp=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
       echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$dp${NC}\n"
       echo -e "${YELLOW}[1]${NC} Cambiar puerto"
       echo -e "${YELLOW}[2]${NC} Desactivar"
@@ -783,10 +908,9 @@ trafico(){
         command -v iptables >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando iptables...${NC}"; apt-get install -y iptables >/dev/null 2>&1; }
         while read -r user _; do
           [[ -z "$user" ]] && continue
-          local uid; uid=$(id -u "$user" 2>/dev/null) || continue
-          iptables -C OUTPUT -m owner --uid-owner "$uid" 2>/dev/null || iptables -A OUTPUT -m owner --uid-owner "$uid"
+          add_traffic_rule "$user"
         done < "$DB"
-        echo -e "\n${GREEN}Medicion activada para todos los usuarios${NC}"; pause;;
+        echo -e "\n${GREEN}Medicion activada (y guardada para que sobreviva reinicios)${NC}"; pause;;
       2)
         banner; echo -e "${WHITE} CONSUMO POR USUARIO${NC}\n"
         printf "${WHITE}%-18s %-12s${NC}\n" "USUARIO" "CONSUMO"
@@ -825,23 +949,61 @@ set_dominio(){
   esac
 }
 
+set_zona(){
+  banner; echo -e "${WHITE} ZONA HORARIA${NC}\n"
+  echo -e " Actual: ${GREEN}$(timedatectl show -p Timezone --value 2>/dev/null)${NC}\n"
+  echo -e "Los vencimientos se calculan por dia, asi que conviene la zona local."
+  read -rp "Zona (ENTER para America/Argentina/Catamarca): " tz
+  [[ -z "$tz" ]] && tz="America/Argentina/Catamarca"
+  if timedatectl set-timezone "$tz" 2>/dev/null; then
+    echo -e "\n${GREEN}Zona horaria: $tz${NC}"
+  else
+    echo -e "\n${RED}Zona invalida. Mira la lista con: timedatectl list-timezones${NC}"
+  fi
+  pause
+}
+
 importar_usuarios(){
   banner; echo -e "${WHITE} IMPORTAR USUARIOS DEL SISTEMA${NC}\n"
   echo -e "Agrega al panel los usuarios del sistema que no esten en la lista"
-  echo -e "(UID >= 1000, excepto 'ubuntu'), para verlos y gestionarlos.\n"
+  echo -e "(UID >= 1000) y los suma al grupo ${CYAN}$VPN_GROUP${NC} para poder gestionarlos.\n"
   local n=0
   while IFS=: read -r u _ uid _; do
     [[ "$uid" =~ ^[0-9]+$ ]] || continue
     [[ "$uid" -ge 1000 ]] || continue
-    [[ "$u" == "ubuntu" || "$u" == "nobody" ]] && continue
+    is_system_user "$u" && continue
     if ! grep -q "^$u " "$DB"; then
+      usermod -aG "$VPN_GROUP" "$u" 2>/dev/null
       echo "$u 1" >> "$DB"
+      add_traffic_rule "$u"
       echo -e "${GREEN}Importado: $u${NC}"; n=$((n+1))
     fi
   done < /etc/passwd
   echo -e "\n${GREEN}$n usuario(s) importado(s) (limite por defecto: 1)${NC}"
-  [[ $n -gt 0 ]] && echo -e "${YELLOW}Ajustá su limite/fecha con las opciones 05 y 06 si hace falta.${NC}"
+  [[ $n -gt 0 ]] && echo -e "${YELLOW}Ajustá su limite/fecha con las opciones 06 y 05 si hace falta.${NC}"
   pause
+}
+
+estado_servicios(){
+  banner; echo -e "${WHITE} ESTADO DE SERVICIOS${NC}\n"
+  local svcs=(ssh fail2ban squid dropbear openvpn@server stunnel4 sslh jgx-limiter)
+  for s in "${svcs[@]}"; do
+    if systemctl is-active --quiet "$s" 2>/dev/null; then
+      printf " %-18s ${GREEN}%s${NC}\n" "$s" "ACTIVO"
+    else
+      printf " %-18s ${RED}%s${NC}\n" "$s" "inactivo"
+    fi
+  done
+  echo ""
+  echo -e "${YELLOW}[1]${NC} Ver logs de un servicio"
+  echo -e "${YELLOW}[2]${NC} Reiniciar un servicio"
+  echo -e "${YELLOW}[0]${NC} Volver"
+  echo ""; read -rp "Opcion: " o
+  case $o in
+    1) read -rp "Servicio: " s; echo ""; journalctl -u "$s" -n 30 --no-pager 2>/dev/null; pause;;
+    2) read -rp "Servicio: " s; systemctl restart "$s" 2>/dev/null && echo -e "${GREEN}Reiniciado${NC}" || echo -e "${RED}No se pudo${NC}"; pause;;
+    0) :;;
+  esac
 }
 
 desinstalar(){
@@ -854,11 +1016,13 @@ desinstalar(){
   echo ""
   read -rp "Borrar tambien los usuarios creados por el panel? [s/n]: " du
   if [[ "$du" =~ ^[sS]$ ]]; then
-    while read -r u _; do
+    # solo los del grupo del panel; nunca usuarios del sistema
+    while read -r u; do
       [[ -z "$u" ]] && continue
+      is_system_user "$u" && continue
       pkill -u "$u" 2>/dev/null; userdel --force "$u" 2>/dev/null
-    done < "$DB"
-    echo -e "${GREEN}Usuarios eliminados${NC}"
+    done < <(getent group "$VPN_GROUP" | awk -F: '{print $4}' | tr ',' '\n' | grep -v '^$')
+    echo -e "${GREEN}Usuarios del panel eliminados${NC}"
   fi
 
   echo -e "\n${YELLOW}Removiendo servicios y archivos...${NC}"
@@ -871,6 +1035,7 @@ desinstalar(){
   systemctl daemon-reload
 
   rm -f /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
+  rm -f /etc/ssh/sshd_config.d/20-jgxeinz-group.conf
   systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
 
   rm -rf /etc/jgxeinz
@@ -878,9 +1043,9 @@ desinstalar(){
 
   clear
   echo -e "${GREEN}JgXeinz VPN desinstalado.${NC}\n"
-  echo -e "${YELLOW}Nota: Dropbear, Squid, SSL Tunnel, SSLH, OpenVPN y el binario badvpn"
-  echo -e "quedan instalados (si los querés sacar, se hace a mano).${NC}"
-  echo -e "${YELLOW}El login por contrasena del SSH queda activado.${NC}\n"
+  echo -e "${YELLOW}Nota: Dropbear, Squid, SSL Tunnel, SSLH, OpenVPN, fail2ban y el binario"
+  echo -e "badvpn quedan instalados (si los querés sacar, se hace a mano).${NC}"
+  echo -e "${YELLOW}El grupo $VPN_GROUP y el login por contrasena del SSH quedan como estan.${NC}\n"
   echo -e "${CYAN}Para reinstalar, corré el install.sh de nuevo.${NC}"
   sleep 1
   exit 0
@@ -894,7 +1059,9 @@ herramientas(){
     echo -e "${YELLOW}[3]${NC} Trafico por usuario"
     echo -e "${YELLOW}[4]${NC} Dominio del servidor"
     echo -e "${YELLOW}[5]${NC} Importar usuarios del sistema"
-    echo -e "${YELLOW}[6]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[6]${NC} Zona horaria"
+    echo -e "${YELLOW}[7]${NC} Estado de servicios"
+    echo -e "${YELLOW}[8]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -903,7 +1070,9 @@ herramientas(){
       3) trafico;;
       4) set_dominio;;
       5) importar_usuarios;;
-      6) desinstalar;;
+      6) set_zona;;
+      7) estado_servicios;;
+      8) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
@@ -930,7 +1099,7 @@ while true; do
     while read -r user limite; do
       [[ -z "$user" ]] && continue
       [[ ! "$limite" =~ ^[0-9]+$ ]] && continue
-      mapfile -t pids < <(ps -u "$user" -o pid=,comm= 2>/dev/null | grep -E 'sshd' | awk '{print $1}')
+      mapfile -t pids < <(ps -u "$user" -o pid=,comm= 2>/dev/null | grep -E 'sshd|dropbear' | awk '{print $1}')
       n=${#pids[@]}
       if (( n > limite )); then
         excess=$(( n - limite ))
@@ -1019,7 +1188,7 @@ header(){
   local now; now=$(date +%s)
   while read -r u _; do
     [[ -z "$u" ]] && continue
-    [[ $(ps -u "$u" 2>/dev/null | grep -c sshd) -gt 0 ]] && online=$((online+1))
+    [[ $(conexiones "$u") -gt 0 ]] && online=$((online+1))
     local ed; ed=$(chage -l "$u" 2>/dev/null | awk -F: '/Account expires/{print $2}' | sed 's/^ *//')
     [[ -z "$ed" || "$ed" == "never" ]] && continue
     local es; es=$(date -d "$ed" +%s 2>/dev/null) || continue
@@ -1086,16 +1255,15 @@ while true; do
   echo ""
   echo -e "                      ${WHITE}M E N U   P R I N C I P A L${NC}"
   echo ""
-  mrow "01" "Crear usuario"      "08" "Remover expirados"
-  mrow "02" "Usuario de prueba"  "09" "Reporte de usuarios"
-  mrow "03" "Remover usuario"    "10" "Modo de conexion"
-  mrow "04" "Monitor online"     "11" "Info del VPS"
-  mrow "05" "Cambiar fecha"      "12" "Backup"
-  mrow "06" "Cambiar limite"     "13" "Actualizar panel"
-  mrow "07" "Cambiar contrasena" "14" "Limiter $lim_st"
-  mrow ""   ""                   "15" "Herramientas"
-  mrow ""   ""                   "16" "Datos de cuenta"
-  mrow ""   ""                   "00" "Salir"
+  mrow "01" "Crear usuario"      "09" "Reporte de usuarios"
+  mrow "02" "Usuario de prueba"  "10" "Modo de conexion"
+  mrow "03" "Remover usuario"    "11" "Info del VPS"
+  mrow "04" "Monitor online"     "12" "Backup"
+  mrow "05" "Cambiar fecha"      "13" "Actualizar panel"
+  mrow "06" "Renovar (sumar)"    "14" "Limiter $lim_st"
+  mrow "07" "Cambiar limite"     "15" "Herramientas"
+  mrow "08" "Cambiar contrasena" "16" "Datos de cuenta"
+  mrow "17" "Remover expirados"  "00" "Salir"
   echo ""
   echo -e "${BLUE}==========================================================${NC}"
   read -rp "  Opcion: " opt
@@ -1105,9 +1273,9 @@ while true; do
     3|03) remover_usuario;;
     4|04) monitor_online;;
     5|05) cambiar_fecha;;
-    6|06) cambiar_limite;;
-    7|07) cambiar_senha;;
-    8|08) remover_expirados;;
+    6|06) renovar_usuario;;
+    7|07) cambiar_limite;;
+    8|08) cambiar_senha;;
     9|09) reporte;;
     10) modo_conexion;;
     11) info_vps;;
@@ -1116,6 +1284,7 @@ while true; do
     14) limiter;;
     15) herramientas;;
     16) datos_cuenta;;
+    17) remover_expirados;;
     0|00) clear; exit 0;;
     *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
   esac
