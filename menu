@@ -20,6 +20,12 @@ VPN_GROUP="$(cat "$DIR/group" 2>/dev/null)"; [[ -z "$VPN_GROUP" ]] && VPN_GROUP=
 
 RED='\033[1;31m'; GREEN='\033[1;32m'; YELLOW='\033[1;33m'
 BLUE='\033[1;34m'; CYAN='\033[1;36m'; WHITE='\033[1;37m'; NC='\033[0m'
+GRAY='\033[0;90m'
+
+# ancho de la interfaz; el separador se arma una sola vez
+UI_W=60
+HR="$(printf '%*s' "$UI_W" '' | sed 's/ /─/g')"
+hr(){ echo -e "${BLUE}${HR}${NC}"; }
 
 [[ $EUID -ne 0 ]] && { echo -e "${RED}Tenes que ejecutarlo como root (usa: sudo -i)${NC}"; exit 1; }
 mkdir -p "$DIR" "$BKP"; touch "$DB"
@@ -63,15 +69,18 @@ all_panel_users(){
 # cuenta conexiones activas de un usuario (sshd + dropbear)
 conexiones(){ ps -u "$1" 2>/dev/null | grep -cE 'sshd|dropbear'; }
 
+# barra de titulo: nombre + version a la izquierda, seccion actual a la derecha.
+# banner "TITULO" -> pantalla de una seccion (deja una linea libre abajo,
+# salvo que se pase un 2do argumento: banner "TITULO" pegado)
 banner(){
   clear
-  echo -e "${BLUE}===============================================${NC}"
-  if command -v figlet >/dev/null 2>&1; then
-    echo -e "${CYAN}$(figlet -w 80 -f small "$PANEL_NAME" 2>/dev/null || echo "   $PANEL_NAME")${NC}"
-  else
-    echo -e "${CYAN}                  $PANEL_NAME${NC}"
-  fi
-  echo -e "${BLUE}===============================================${NC}"
+  local ver="v$VERSION" right="${1:-PANEL DE ADMINISTRACION}" pad
+  pad=$(( UI_W - ${#PANEL_NAME} - ${#ver} - ${#right} - 3 ))
+  (( pad < 1 )) && pad=1
+  hr
+  printf " ${WHITE}%s${NC} ${GRAY}%s${NC}%*s${CYAN}%s${NC}\n" "$PANEL_NAME" "$ver" "$pad" "" "$right"
+  hr
+  [[ -n "$1" && -z "$2" ]] && echo ""
 }
 
 # --------------------------------------------------------------
@@ -136,7 +145,7 @@ add_traffic_rule(){
 }
 
 datos_cuenta(){
-  banner; echo -e "${WHITE} DATOS DE CUENTA${NC}\n"
+  banner "DATOS DE CUENTA"
   mapfile -t us < <(ls -1 "$DIR/cuentas"/*.txt 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.txt$//')
   [[ ${#us[@]} -eq 0 ]] && { echo -e "${RED}No hay cuentas guardadas (se guardan al crear usuarios).${NC}"; pause; return; }
   local i=1; for u in "${us[@]}"; do echo -e "${YELLOW}[$i]${NC} $u"; ((i++)); done
@@ -149,7 +158,7 @@ datos_cuenta(){
 }
 
 crear_usuario(){
-  banner; echo -e "${WHITE} CREAR USUARIO${NC}\n"
+  banner "CREAR USUARIO"
   read -rp "Nombre de usuario: " user
   [[ -z "$user" ]] && { echo -e "${RED}Usuario vacio${NC}"; pause; return; }
   valid_user "$user" || { echo -e "${RED}Nombre invalido. Usa minusculas, numeros, '-' o '_' (sin espacios).${NC}"; pause; return; }
@@ -175,7 +184,7 @@ crear_usuario(){
 }
 
 crear_teste(){
-  banner; echo -e "${WHITE} USUARIO DE PRUEBA${NC}\n"
+  banner "USUARIO DE PRUEBA"
   read -rp "Minutos de validez [por defecto 30]: " mins
   [[ ! "$mins" =~ ^[0-9]+$ ]] && mins=30
   local user pass; user="test$(shuf -i 100-999 -n1)"; pass="$(shuf -i 1000-9999 -n1)"
@@ -202,7 +211,7 @@ crear_teste(){
 }
 
 remover_usuario(){
-  banner; echo -e "${WHITE} REMOVER USUARIO${NC}\n"
+  banner "REMOVER USUARIO"
   mapfile -t users < <(all_panel_users)
   [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios${NC}"; pause; return; }
   local i=1
@@ -230,11 +239,10 @@ remover_usuario(){
 
 monitor_online(){
   while true; do
-    clear
+    banner "MONITOR EN VIVO" pegado
     header
-    echo -e "${WHITE} MONITOR EN VIVO${NC}"
     printf "${WHITE} %-15s %-9s %-7s %-8s${NC}\n" "USUARIO" "ESTADO" "CONEX" "DATOS"
-    echo -e "${BLUE}-----------------------------------------------${NC}"
+    hr
     local ipt on=0; ipt=$(iptables -L OUTPUT -v -n -x 2>/dev/null)
     while read -r user; do
       [[ -z "$user" ]] && continue
@@ -252,7 +260,7 @@ monitor_online(){
         printf " %-15s ${RED}%-9s${NC} %-7s %-8s%b\n" "$user" "offline" "0/$limite" "${mb}MB" "$tag"
       fi
     done < <(all_panel_users)
-    echo -e "${BLUE}-----------------------------------------------${NC}"
+    hr
     echo -e " ${WHITE}Online: ${GREEN}$on${NC}   ${YELLOW}(se actualiza cada 3s - apreta 'q' para salir)${NC}"
     read -t 3 -n 1 -s k
     [[ "$k" == "q" ]] && break
@@ -272,7 +280,7 @@ regen_cuenta(){
 }
 
 cambiar_fecha(){
-  banner; echo -e "${WHITE} CAMBIAR FECHA DE VENCIMIENTO${NC}\n"
+  banner "CAMBIAR FECHA DE VENCIMIENTO"
   read -rp "Usuario: " user
   id "$user" &>/dev/null || { echo -e "${RED}Ese usuario no existe${NC}"; pause; return; }
   read -rp "Nuevos dias de validez: " dias
@@ -284,7 +292,7 @@ cambiar_fecha(){
 }
 
 renovar_usuario(){
-  banner; echo -e "${WHITE} RENOVAR USUARIO (sumar dias)${NC}\n"
+  banner "RENOVAR USUARIO (SUMAR DIAS)"
   read -rp "Usuario: " user
   id "$user" &>/dev/null || { echo -e "${RED}Ese usuario no existe${NC}"; pause; return; }
   read -rp "Dias a sumar: " dias
@@ -305,7 +313,7 @@ renovar_usuario(){
 }
 
 cambiar_limite(){
-  banner; echo -e "${WHITE} CAMBIAR LIMITE DE CONEXIONES${NC}\n"
+  banner "CAMBIAR LIMITE DE CONEXIONES"
   read -rp "Usuario: " user
   grep -q "^$user " "$DB" || { echo -e "${RED}Ese usuario no esta en la base${NC}"; pause; return; }
   read -rp "Nuevo limite: " limite
@@ -318,7 +326,7 @@ cambiar_limite(){
 }
 
 cambiar_senha(){
-  banner; echo -e "${WHITE} CAMBIAR CONTRASENA${NC}\n"
+  banner "CAMBIAR CONTRASENA"
   read -rp "Usuario: " user
   id "$user" &>/dev/null || { echo -e "${RED}Ese usuario no existe${NC}"; pause; return; }
   read -rp "Nueva contrasena: " pass
@@ -329,7 +337,7 @@ cambiar_senha(){
 }
 
 remover_expirados(){
-  banner; echo -e "${WHITE} REMOVER EXPIRADOS${NC}\n"
+  banner "REMOVER EXPIRADOS"
   local hoy n=0; hoy=$(date +%s)
   while read -r user _; do
     [[ -z "$user" ]] && continue
@@ -348,7 +356,7 @@ remover_expirados(){
 }
 
 reporte(){
-  banner; echo -e "${WHITE} REPORTE DE USUARIOS${NC}\n"
+  banner "REPORTE DE USUARIOS"
   printf "${WHITE}%-16s %-12s %-7s %-6s${NC}\n" "USUARIO" "VENCE" "DIAS" "LIMITE"
   echo "-------------------------------------------"
   local hoy; hoy=$(date +%s)
@@ -421,7 +429,7 @@ EOF
 
 ssh_ports_mgr(){
   while true; do
-    banner; echo -e "${WHITE} OPENSSH${NC}\n"
+    banner "OPENSSH"
     echo -e " Puertos SSH: ${GREEN}$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}\n"
     echo -e "${YELLOW}[1]${NC} Agregar puerto"
     echo -e "${YELLOW}[2]${NC} Quitar puerto"
@@ -451,7 +459,7 @@ ssh_ports_mgr(){
 
 ws_mgr(){
   while true; do
-    banner; echo -e "${WHITE} PROXY SOCKS / WEBSOCKET${NC}\n"
+    banner "PROXY SOCKS / WEBSOCKET"
     local ports; ports=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | xargs)
     echo -e " Puertos activos: ${GREEN}${ports:-ninguno}${NC}\n"
     echo -e "${YELLOW}[1]${NC} Activar en un puerto"
@@ -468,7 +476,7 @@ ws_mgr(){
 
 badvpn_mgr(){
   while true; do
-    banner; echo -e "${WHITE} BADVPN UDPGW (voz/UDP)${NC}\n"
+    banner "BADVPN UDPGW (VOZ/UDP)"
     local ports; ports=$(systemctl list-units 'jgx-badvpn@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-badvpn@\K[0-9]+' | xargs)
     echo -e " Puertos activos: ${GREEN}${ports:-ninguno}${NC}"
     echo -e " ${YELLOW}(corren en 127.0.0.1 y van por el tunel: NO se abren en AWS)${NC}\n"
@@ -485,7 +493,7 @@ badvpn_mgr(){
 }
 
 squid_mgr(){
-  banner; echo -e "${WHITE} SQUID PROXY${NC}\n"
+  banner "SQUID PROXY"
   if systemctl is-active --quiet squid 2>/dev/null; then
     local sp; sp=$(ss -tlnp 2>/dev/null | grep squid | grep -oP ':\K[0-9]+' | sort -u | xargs)
     echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puertos: ${GREEN}$sp${NC}\n"
@@ -517,7 +525,7 @@ squid_mgr(){
 }
 
 ssl_tunnel_mgr(){
-  banner; echo -e "${WHITE} SSL TUNNEL (stunnel)${NC}\n"
+  banner "SSL TUNNEL (STUNNEL)"
   if systemctl is-active --quiet stunnel4 2>/dev/null; then
     local sp; sp=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+' | xargs)
     echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$sp${NC}\n"
@@ -548,7 +556,7 @@ EOF
 }
 
 sslh_mgr(){
-  banner; echo -e "${WHITE} SSLH MULTIPLEX${NC}\n"
+  banner "SSLH MULTIPLEX"
   if systemctl is-active --quiet sslh 2>/dev/null; then
     echo -e "Estado: ${GREEN}ACTIVADO${NC}\n"
     read -rp "Desactivar SSLH? [s/n]: " r
@@ -684,7 +692,7 @@ EOF
 }
 
 openvpn_mgr(){
-  banner; echo -e "${WHITE} OPENVPN${NC}\n"
+  banner "OPENVPN"
   if systemctl is-active --quiet openvpn@server 2>/dev/null; then
     local op; op=$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')
     echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$op (tcp)${NC}\n"
@@ -715,7 +723,7 @@ openvpn_mgr(){
 
 modo_conexion(){
   while true; do
-    banner
+    banner "MODO DE CONEXION"
     local st_ssh st_squid st_drop st_ovpn st_ws st_ssl st_sslh st_bad
     st_ssh="${GREEN}ON${NC}"
     systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}ON${NC}" || st_squid="${RED}OFF${NC}"
@@ -725,9 +733,8 @@ modo_conexion(){
     systemctl is-active --quiet stunnel4 2>/dev/null && st_ssl="${GREEN}ON${NC}" || st_ssl="${RED}OFF${NC}"
     systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}ON${NC}" || st_sslh="${RED}OFF${NC}"
     pgrep -x badvpn-udpgw >/dev/null && st_bad="${GREEN}ON${NC}" || st_bad="${RED}OFF${NC}"
-    echo -e "${WHITE} MODO DE CONEXION${NC}"
-    echo -e " SSH: ${GREEN}$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
-    echo -e "${BLUE}-----------------------------------------------${NC}"
+    echo -e " ${GRAY}Puertos SSH:${NC} ${GREEN}$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
+    hr
     echo -e "${YELLOW}[01]${NC} OPENSSH             $st_ssh"
     echo -e "${YELLOW}[02]${NC} SQUID PROXY         $st_squid"
     echo -e "${YELLOW}[03]${NC} DROPBEAR            $st_drop"
@@ -738,7 +745,7 @@ modo_conexion(){
     echo -e "${YELLOW}[08]${NC} SLOWDNS             ${CYAN}proximamente${NC}"
     echo -e "${YELLOW}[09]${NC} BADVPN UDPGW        $st_bad"
     echo -e "${YELLOW}[00]${NC} Volver"
-    echo -e "${BLUE}-----------------------------------------------${NC}"
+    hr
     echo ""
     read -rp "Opcion: " op
     case $op in
@@ -761,7 +768,7 @@ modo_conexion(){
 #  INFO Y BACKUP
 # --------------------------------------------------------------
 info_vps(){
-  banner; echo -e "${WHITE} INFO DEL VPS${NC}\n"
+  banner "INFO DEL VPS"
   echo -e " Sistema  : ${GREEN}$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")${NC}"
   echo -e " Uptime   : ${GREEN}$(uptime -p 2>/dev/null)${NC}"
   echo -e " CPU      : ${GREEN}$(nproc) nucleo(s)${NC}"
@@ -774,7 +781,7 @@ info_vps(){
 
 backup(){
   while true; do
-    banner; echo -e "${WHITE} BACKUP DE USUARIOS${NC}\n"
+    banner "BACKUP DE USUARIOS"
     echo -e "${YELLOW}[1]${NC} Crear backup"
     echo -e "${YELLOW}[2]${NC} Restaurar backup"
     echo -e "${YELLOW}[0]${NC} Volver"
@@ -821,7 +828,7 @@ backup(){
 }
 
 optimizar(){
-  banner; echo -e "${WHITE} OPTIMIZAR RED (BBR)${NC}\n"
+  banner "OPTIMIZAR RED (BBR)"
   modprobe tcp_bbr 2>/dev/null
   cat > /etc/sysctl.d/99-jgxeinz.conf <<'EOF'
 net.core.default_qdisc=fq
@@ -841,7 +848,7 @@ EOF
 }
 
 editar_banner(){
-  banner; echo -e "${WHITE} BANNER (mensaje al conectar)${NC}\n"
+  banner "BANNER (MENSAJE AL CONECTAR)"
   local FS=$' '   # espacio invisible de ancho normal (no lo junta HTTP Custom)
   if [[ -f "$DIR/banner.txt" ]]; then
     # mostrar el actual con los invisibles convertidos a espacio real, para que se lea
@@ -867,7 +874,7 @@ editar_banner(){
 
 dropbear_mgr(){
   while true; do
-    banner; echo -e "${WHITE} DROPBEAR (otro servidor SSH)${NC}\n"
+    banner "DROPBEAR (OTRO SERVIDOR SSH)"
     if systemctl is-active --quiet dropbear 2>/dev/null; then
       local dp; dp=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
       echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$dp${NC}\n"
@@ -905,7 +912,7 @@ dropbear_mgr(){
 
 trafico(){
   while true; do
-    banner; echo -e "${WHITE} TRAFICO POR USUARIO${NC}\n"
+    banner "TRAFICO POR USUARIO"
     echo -e "${YELLOW}(aprox: mide la subida del servidor por usuario)${NC}\n"
     echo -e "${YELLOW}[1]${NC} Activar medicion"
     echo -e "${YELLOW}[2]${NC} Ver consumo"
@@ -921,7 +928,7 @@ trafico(){
         done < "$DB"
         echo -e "\n${GREEN}Medicion activada (y guardada para que sobreviva reinicios)${NC}"; pause;;
       2)
-        banner; echo -e "${WHITE} CONSUMO POR USUARIO${NC}\n"
+        banner "CONSUMO POR USUARIO"
         printf "${WHITE}%-18s %-12s${NC}\n" "USUARIO" "CONSUMO"
         echo "-----------------------------------"
         while read -r user _; do
@@ -940,7 +947,7 @@ trafico(){
 }
 
 set_dominio(){
-  banner; echo -e "${WHITE} DOMINIO DEL SERVIDOR${NC}\n"
+  banner "DOMINIO DEL SERVIDOR"
   local cur; cur=$(cat "$DIR/domain" 2>/dev/null)
   echo -e " Actual: ${GREEN}${cur:-(ninguno, se usa la IP)}${NC}\n"
   echo -e "${YELLOW}[1]${NC} Poner / cambiar dominio"
@@ -959,7 +966,7 @@ set_dominio(){
 }
 
 set_zona(){
-  banner; echo -e "${WHITE} ZONA HORARIA${NC}\n"
+  banner "ZONA HORARIA"
   echo -e " Actual: ${GREEN}$(timedatectl show -p Timezone --value 2>/dev/null)${NC}\n"
   echo -e "Los vencimientos se calculan por dia, asi que conviene la zona local."
   read -rp "Zona (ENTER para America/Argentina/Catamarca): " tz
@@ -973,7 +980,7 @@ set_zona(){
 }
 
 importar_usuarios(){
-  banner; echo -e "${WHITE} IMPORTAR USUARIOS DEL SISTEMA${NC}\n"
+  banner "IMPORTAR USUARIOS DEL SISTEMA"
   echo -e "Agrega al panel los usuarios del sistema que no esten en la lista"
   echo -e "(UID >= 1000) y los suma al grupo ${CYAN}$VPN_GROUP${NC} para poder gestionarlos.\n"
   local n=0
@@ -994,7 +1001,7 @@ importar_usuarios(){
 }
 
 estado_servicios(){
-  banner; echo -e "${WHITE} ESTADO DE SERVICIOS${NC}\n"
+  banner "ESTADO DE SERVICIOS"
   local svcs=(ssh fail2ban squid dropbear openvpn@server stunnel4 sslh jgx-limiter)
   for s in "${svcs[@]}"; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then
@@ -1062,7 +1069,7 @@ desinstalar(){
 
 herramientas(){
   while true; do
-    banner; echo -e "${WHITE} HERRAMIENTAS${NC}\n"
+    banner "HERRAMIENTAS"
     echo -e "${YELLOW}[1]${NC} Optimizar red (BBR)"
     echo -e "${YELLOW}[2]${NC} Banner / mensaje de conexion"
     echo -e "${YELLOW}[3]${NC} Trafico por usuario"
@@ -1089,7 +1096,7 @@ herramientas(){
 }
 
 limiter(){
-  banner; echo -e "${WHITE} LIMITER (control de conexiones)${NC}\n"
+  banner "LIMITER (CONTROL DE CONEXIONES)"
   if systemctl is-active --quiet jgx-limiter 2>/dev/null; then
     echo -e "Estado actual: ${GREEN}ACTIVADO${NC}\n"
     read -rp "Desactivar el limiter? [s/n]: " r
@@ -1143,7 +1150,7 @@ EOF
 }
 
 actualizar(){
-  banner; echo -e "${WHITE} ACTUALIZAR PANEL${NC}\n"
+  banner "ACTUALIZAR PANEL"
   echo -e "${YELLOW}Descargando ultima version...${NC}"
   local sha base
   sha=$(curl -fsSL "https://api.github.com/repos/jtapiaa22/JgXeinz-VPN/commits/main?t=$(date +%s)" 2>/dev/null | grep -oE '[0-9a-f]{40}' | head -1)
@@ -1165,21 +1172,27 @@ actualizar(){
   fi
 }
 
+# barra de uso: 16 celdas + porcentaje, color segun carga
 bar(){
-  local pct=${1:-0} width=16 filled empty b="" e="" col i
+  local pct=${1:-0} width=16 filled b="" e="" col i
   [[ "$pct" =~ ^[0-9]+$ ]] || pct=0
   [[ $pct -gt 100 ]] && pct=100
-  filled=$(( pct * width / 100 )); empty=$(( width - filled ))
-  for ((i=0;i<filled;i++)); do b+="|"; done
-  for ((i=0;i<empty;i++)); do e+="-"; done
+  filled=$(( pct * width / 100 ))
+  for ((i=0;i<filled;i++)); do b+="█"; done
+  for ((i=filled;i<width;i++)); do e+="░"; done
   if [[ $pct -ge 85 ]]; then col=$RED; elif [[ $pct -ge 60 ]]; then col=$YELLOW; else col=$GREEN; fi
-  echo -ne "${col}[${b}${e}]${NC} ${pct}%"
+  printf "${col}%s${GRAY}%s${NC} %3d%%" "$b" "$e" "$pct"
+}
+
+# indicador de servicio: punto verde si esta activo, gris si no
+svc(){
+  if [[ "$2" == 1 ]]; then echo -ne "${GREEN}●${NC} $1  "; else echo -ne "${GRAY}○ $1${NC}  "; fi
 }
 
 header(){
-  local os up ip host cores users online hora ram_h exp
+  local os up ip host cores users online hora exp
   os=$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")
-  up=$(uptime -p 2>/dev/null | sed 's/^up //')
+  up=$(uptime -p 2>/dev/null | sed -E 's/^up //; s/ weeks?/w/; s/ days?/d/; s/ hours?/h/; s/ minutes?/m/; s/,//g')
   hora=$(date +%T)
   ip=$(get_ip)
   host=$(cat "$DIR/domain" 2>/dev/null)
@@ -1187,7 +1200,6 @@ header(){
   local load ram_u ram_t ram_pct disk_u disk_t disk_pct cpu_pct
   load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
   read -r ram_u ram_t < <(free -m | awk '/Mem/{print $3, $2}')
-  ram_h=$(free -h | awk '/Mem/{print $2}')
   ram_pct=$(( ram_t>0 ? ram_u*100/ram_t : 0 ))
   read -r disk_u disk_t < <(df -h / | awk 'NR==2{print $3, $2}')
   disk_pct=$(df / | awk 'NR==2{gsub("%","",$5); print $5}')
@@ -1203,40 +1215,27 @@ header(){
     local es; es=$(date -d "$ed" +%s 2>/dev/null) || continue
     [[ -n "$es" && "$es" -lt "$now" ]] && exp=$((exp+1))
   done < "$DB"
-  local s_ws s_drop s_ovpn s_ssl s_bad s_squid s_lim
-  [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && s_ws="${GREEN}ON${NC}" || s_ws="${RED}OFF${NC}"
-  systemctl is-active --quiet dropbear 2>/dev/null && s_drop="${GREEN}ON${NC}" || s_drop="${RED}OFF${NC}"
-  systemctl is-active --quiet openvpn@server 2>/dev/null && s_ovpn="${GREEN}ON${NC}" || s_ovpn="${RED}OFF${NC}"
-  systemctl is-active --quiet stunnel4 2>/dev/null && s_ssl="${GREEN}ON${NC}" || s_ssl="${RED}OFF${NC}"
-  pgrep -x badvpn-udpgw >/dev/null && s_bad="${GREEN}ON${NC}" || s_bad="${RED}OFF${NC}"
-  systemctl is-active --quiet squid 2>/dev/null && s_squid="${GREEN}ON${NC}" || s_squid="${RED}OFF${NC}"
-  systemctl is-active --quiet jgx-limiter 2>/dev/null && s_lim="${GREEN}ON${NC}" || s_lim="${RED}OFF${NC}"
+  local s_ws=0 s_drop=0 s_ovpn=0 s_ssl=0 s_bad=0 s_squid=0 s_lim=0
+  [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && s_ws=1
+  systemctl is-active --quiet dropbear 2>/dev/null && s_drop=1
+  systemctl is-active --quiet openvpn@server 2>/dev/null && s_ovpn=1
+  systemctl is-active --quiet stunnel4 2>/dev/null && s_ssl=1
+  pgrep -x badvpn-udpgw >/dev/null && s_bad=1
+  systemctl is-active --quiet squid 2>/dev/null && s_squid=1
+  systemctl is-active --quiet jgx-limiter 2>/dev/null && s_lim=1
 
-  # --- cabeceras de columna (padding sobre texto plano, luego color) ---
-  local h1 h2 o1 o2
-  h1=$(printf "%-23s" "SISTEMA");      h2=$(printf "%-20s" "MEMORIA RAM")
-  o1=$(printf "%-23s" "Onlines: $online"); o2=$(printf "%-20s" "Expirados: $exp")
-
-  echo -e "${BLUE}==========================================================${NC}"
-  echo ""
-  echo -e "   ${CYAN}${h1}${YELLOW}${h2}${GREEN}PROCESADOR${NC}"
-  printf "   %-22s %-19s %s\n" "OS: $os" "Total: $ram_h" "Nucleos: $cores"
-  printf "   %-22s %-19s %s\n" "Hora: $hora" "En uso: ${ram_pct}%" "En uso: ${cpu_pct}%"
-  echo ""
-  echo -e "${BLUE}   ------------------------------------------------------${NC}"
-  echo ""
-  echo -e "   ${WHITE}CPU  ${NC} $(bar "$cpu_pct")   ${WHITE}carga${NC} $load / ${cores}c"
-  echo -e "   ${WHITE}RAM  ${NC} $(bar "$ram_pct")   ${ram_u}M / ${ram_t}M"
-  echo -e "   ${WHITE}DISCO${NC} $(bar "$disk_pct")   ${disk_u} / ${disk_t}"
-  echo ""
-  echo -e "${BLUE}   ------------------------------------------------------${NC}"
-  echo ""
-  echo -e "   ${GREEN}${o1}${YELLOW}${o2}${CYAN}Total: $users${NC}"
-  echo ""
-  [[ -n "$host" ]] && echo -e "   ${WHITE}IP  :${NC} $ip ${WHITE}/${NC} ${GREEN}$host${NC}" || echo -e "   ${WHITE}IP  :${NC} $ip"
-  echo -e "   ${WHITE}SERV:${NC} SSH:${GREEN}ON${NC} WS:$s_ws DROP:$s_drop OVPN:$s_ovpn SSL:$s_ssl SQUID:$s_squid BAD:$s_bad LIM:$s_lim"
-  echo ""
-  echo -e "${BLUE}==========================================================${NC}"
+  # dos columnas "etiqueta valor"; el padding va sobre texto plano
+  printf " ${GRAY}%-7s${NC}%-27.27s${GRAY}%-8s${NC}%s\n" "OS" "$os" "Hora" "$hora"
+  printf " ${GRAY}%-7s${NC}%-27.27s${GRAY}%-8s${NC}%s\n" "IP" "$ip" "Uptime" "$up"
+  [[ -n "$host" ]] && printf " ${GRAY}%-7s${NC}${GREEN}%s${NC}\n" "Host" "$host"
+  echo -e " ${GRAY}CPU    ${NC}$(bar "$cpu_pct")   ${GRAY}carga${NC} $load ${GRAY}/ ${cores} nucleo(s)${NC}"
+  echo -e " ${GRAY}RAM    ${NC}$(bar "$ram_pct")   ${ram_u}M ${GRAY}/${NC} ${ram_t}M"
+  echo -e " ${GRAY}Disco  ${NC}$(bar "$disk_pct")   ${disk_u} ${GRAY}/${NC} ${disk_t}"
+  hr
+  local exp_col=$GRAY; [[ $exp -gt 0 ]] && exp_col=$RED
+  echo -e " ${GRAY}Usuarios${NC} ${WHITE}$users${NC}     ${GRAY}Online${NC} ${GREEN}$online${NC}     ${GRAY}Expirados${NC} ${exp_col}$exp${NC}"
+  echo -e " $(svc SSH 1)$(svc WS $s_ws)$(svc DROP $s_drop)$(svc OVPN $s_ovpn)$(svc SSL $s_ssl)$(svc SQUID $s_squid)$(svc BAD $s_bad)$(svc LIM $s_lim)"
+  hr
 }
 
 # --------------------------------------------------------------
@@ -1244,38 +1243,27 @@ header(){
 # --------------------------------------------------------------
 # fila de menu en 2 columnas parejas (el padding se hace sobre texto plano)
 mrow(){
-  local nL="$1" lL="$2" nR="$3" lR="$4" left
-  if [[ -n "$nL" ]]; then
-    left="${YELLOW}[$nL]${NC} $(printf '%-22s' "$lL")"
-  else
-    left="     $(printf '%-22s' '')"
-  fi
-  if [[ -n "$nR" ]]; then
-    echo -e "    ${left}${YELLOW}[$nR]${NC} ${lR}"
-  else
-    echo -e "    ${left}"
-  fi
+  local nL="$1" lL="$2" nR="$3" lR="$4"
+  printf " ${YELLOW}[%s]${NC} %-24s" "$nL" "$lL"
+  [[ -n "$nR" ]] && echo -ne "${YELLOW}[$nR]${NC} ${lR}"
+  echo ""
 }
 
 while true; do
   banner
-  systemctl is-active --quiet jgx-limiter 2>/dev/null && lim_st="${GREEN}ON${NC}" || lim_st="${RED}OFF${NC}"
+  systemctl is-active --quiet jgx-limiter 2>/dev/null && lim_st="${GREEN}ON${NC}" || lim_st="${GRAY}OFF${NC}"
   header
-  echo ""
-  echo -e "                      ${WHITE}M E N U   P R I N C I P A L${NC}"
-  echo ""
-  mrow "01" "Crear usuario"      "09" "Reporte de usuarios"
-  mrow "02" "Usuario de prueba"  "10" "Modo de conexion"
-  mrow "03" "Remover usuario"    "11" "Info del VPS"
-  mrow "04" "Monitor online"     "12" "Backup"
-  mrow "05" "Cambiar fecha"      "13" "Actualizar panel"
-  mrow "06" "Renovar (sumar)"    "14" "Limiter $lim_st"
-  mrow "07" "Cambiar limite"     "15" "Herramientas"
-  mrow "08" "Cambiar contrasena" "16" "Datos de cuenta"
-  mrow "17" "Remover expirados"  "00" "Salir"
-  echo ""
-  echo -e "${BLUE}==========================================================${NC}"
-  read -rp "  Opcion: " opt
+  mrow "01" "Crear usuario"       "10" "Modo de conexion"
+  mrow "02" "Usuario de prueba"   "11" "Info del VPS"
+  mrow "03" "Remover usuario"     "12" "Backup"
+  mrow "04" "Monitor online"      "13" "Actualizar panel"
+  mrow "05" "Cambiar fecha"       "14" "Limiter $lim_st"
+  mrow "06" "Renovar (sumar)"     "15" "Herramientas"
+  mrow "07" "Cambiar limite"      "16" "Datos de cuenta"
+  mrow "08" "Cambiar contrasena"  "17" "Remover expirados"
+  mrow "09" "Reporte de usuarios" "00" "${RED}Salir${NC}"
+  hr
+  read -rp "$(echo -e " ${CYAN}›${NC} Opcion: ")" opt
   case $opt in
     1|01) crear_usuario;;
     2|02) crear_teste;;
