@@ -118,7 +118,7 @@ gen_cuenta(){
   local host; host=$(cat "$DIR/domain" 2>/dev/null); [[ -z "$host" ]] && host="$ip"
   sshp=$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | paste -sd, -)
   [[ -z "$sshp" ]] && sshp="22"
-  systemctl is-active --quiet dropbear 2>/dev/null && dropp=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
+  drop_on && dropp=$(drop_port)
   wsp=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | paste -sd, -)
   systemctl is-active --quiet openvpn@server 2>/dev/null && ovpnp=$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')
   systemctl is-active --quiet stunnel4 2>/dev/null && sslp=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+' | paste -sd, -)
@@ -762,8 +762,8 @@ modo_conexion(){
     if systemctl is-active --quiet squid 2>/dev/null; then
       on_squid=1; p_squid=$(grep -oP '^http_port\s+\K[0-9]+' /etc/squid/squid.conf 2>/dev/null | paste -sd, - | sed 's/,/, /g')
     fi
-    if systemctl is-active --quiet dropbear 2>/dev/null; then
-      on_drop=1; p_drop=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
+    if drop_on; then
+      on_drop=1; p_drop=$(drop_port)
     fi
     if systemctl is-active --quiet openvpn@server 2>/dev/null; then
       on_ovpn=1; p_ovpn="$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')${GRAY}/tcp${NC}"
@@ -922,48 +922,80 @@ editar_banner(){
   echo -e "\n${GREEN}Banner actualizado y aplicado.${NC} Reconectate para verlo."; pause
 }
 
+# Dropbear corre con un servicio propio del panel (jgx-dropbear): el paquete
+# cambia de nombre/config segun la distro y a veces ni trae claves. Con -R
+# dropbear genera solo las claves que falten.
+drop_on(){ systemctl is-active --quiet jgx-dropbear 2>/dev/null; }
+drop_port(){ cat "$DIR/dropbear_port" 2>/dev/null; }
+
+dropbear_start(){
+  local p="$1" bin
+  bin=$(command -v dropbear 2>/dev/null || echo /usr/sbin/dropbear)
+  mkdir -p /etc/dropbear
+  # el servicio del paquete (si existe) queda apagado para que no choque
+  systemctl disable --now dropbear >/dev/null 2>&1
+  cat > /etc/systemd/system/jgx-dropbear.service <<UNIT
+[Unit]
+Description=JgXeinz Dropbear
+After=network.target
+[Service]
+ExecStart=$bin -F -E -R -p $p
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+UNIT
+  echo "$p" > "$DIR/dropbear_port"
+  systemctl daemon-reload
+  systemctl enable jgx-dropbear >/dev/null 2>&1
+  systemctl restart jgx-dropbear >/dev/null 2>&1
+  sleep 1
+  if drop_on; then
+    echo -e "\n${GREEN}Dropbear activo en el puerto $p. Abrilo en AWS y usalo como otro metodo SSH.${NC}"
+  else
+    echo -e "\n${RED}No se pudo activar. Ultimos mensajes de dropbear:${NC}"
+    # solo lo que dice dropbear, sin los avisos genericos de systemd
+    journalctl -u jgx-dropbear -n 40 --no-pager -o cat 2>/dev/null \
+      | grep -vE '^(jgx-dropbear\.service:|Failed to start|Started|Starting|Stopped|Stopping)' \
+      | tail -5 | sed 's/^/  /'
+  fi
+}
+
 dropbear_mgr(){
   while true; do
     banner "DROPBEAR (OTRO SERVIDOR SSH)"
-    if systemctl is-active --quiet dropbear 2>/dev/null; then
-      local dp; dp=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
-      echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$dp${NC}\n"
+    local p ocupa
+    if drop_on; then
+      echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$(drop_port)${NC}\n"
       echo -e "${YELLOW}[1]${NC} Cambiar puerto"
       echo -e "${YELLOW}[2]${NC} Desactivar"
       echo -e "${YELLOW}[0]${NC} Volver"
       echo ""; read -rp "Opcion: " o
       case $o in
         1) read -rp "Nuevo puerto: " p
-           local ocupa; ocupa=$(quien_usa_puerto "$p")
+           [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; continue; }
+           ocupa=$(quien_usa_puerto "$p")
            [[ -n "$ocupa" ]] && { echo -e "${RED}El puerto $p ya lo esta usando: ${WHITE}$ocupa${NC}"; pause; continue; }
-           [[ "$p" =~ ^[0-9]+$ ]] && { sed -i "s/^DROPBEAR_PORT=.*/DROPBEAR_PORT=$p/" /etc/default/dropbear; systemctl restart dropbear; echo -e "${GREEN}Puerto cambiado a $p. Abrilo en AWS.${NC}"; } || echo -e "${RED}Puerto invalido${NC}"; pause;;
-        2) systemctl disable --now dropbear >/dev/null 2>&1; echo -e "${GREEN}Dropbear desactivado${NC}"; pause;;
+           dropbear_start "$p"; pause;;
+        2) systemctl disable --now jgx-dropbear >/dev/null 2>&1; echo -e "${GREEN}Dropbear desactivado${NC}"; pause;;
         0) break;;
       esac
     else
       echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
-      read -rp "Puerto para Dropbear [ej: 90]: " p
+      read -rp "Puerto para Dropbear [ej: 90] (ENTER o 0 para volver): " p
+      [[ -z "$p" || "$p" == 0 ]] && break
       [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; continue; }
-      local ocupa; ocupa=$(quien_usa_puerto "$p")
+      ocupa=$(quien_usa_puerto "$p")
       if [[ -n "$ocupa" ]]; then
         echo -e "\n${RED}El puerto $p ya lo esta usando: ${WHITE}$ocupa${NC}"
         echo -e "${YELLOW}Elegi otro puerto o libera ese primero.${NC}"; pause; continue
       fi
       command -v dropbear >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando dropbear...${NC}"; apt-get install -y dropbear >/dev/null 2>&1; }
       grep -qx "/bin/false" /etc/shells 2>/dev/null || echo "/bin/false" >> /etc/shells
-      sed -i 's/^NO_START=1/NO_START=0/' /etc/default/dropbear 2>/dev/null
-      if grep -q "^DROPBEAR_PORT=" /etc/default/dropbear 2>/dev/null; then
-        sed -i "s/^DROPBEAR_PORT=.*/DROPBEAR_PORT=$p/" /etc/default/dropbear
-      else
-        echo "DROPBEAR_PORT=$p" >> /etc/default/dropbear
-      fi
-      systemctl enable dropbear >/dev/null 2>&1
-      systemctl restart dropbear >/dev/null 2>&1
-      systemctl is-active --quiet dropbear \
-        && echo -e "\n${GREEN}Dropbear activo en el puerto $p. Abrilo en AWS y usalo como otro metodo SSH.${NC}" \
-        || { echo -e "\n${RED}No se pudo activar. Ultimos mensajes de dropbear:${NC}"
-             journalctl -u dropbear -n 6 --no-pager -o cat 2>/dev/null | sed 's/^/  /'; }
+      dropbear_start "$p"
       pause
+      # si no arranco, volver a Modo de conexion en vez de pedir el puerto de nuevo
+      drop_on || break
     fi
   done
 }
@@ -1060,7 +1092,7 @@ importar_usuarios(){
 
 estado_servicios(){
   banner "ESTADO DE SERVICIOS"
-  local svcs=(ssh fail2ban squid dropbear openvpn@server stunnel4 sslh jgx-limiter jgx-userbanner)
+  local svcs=(ssh fail2ban squid openvpn@server stunnel4 sslh jgx-dropbear jgx-limiter jgx-userbanner)
   for s in "${svcs[@]}"; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then
       printf " %-18s ${GREEN}%s${NC}\n" "$s" "ACTIVO"
@@ -1103,10 +1135,10 @@ desinstalar(){
   for u in $(systemctl list-units 'jgx-ws@*' 'jgx-badvpn@*' --all --no-legend 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" 2>/dev/null
   done
-  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner 2>/dev/null
+  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear 2>/dev/null
   rm -f /etc/systemd/system/jgx-ws@.service /etc/systemd/system/jgx-badvpn@.service \
         /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service \
-        /etc/systemd/system/jgx-userbanner.service
+        /etc/systemd/system/jgx-userbanner.service /etc/systemd/system/jgx-dropbear.service
   systemctl daemon-reload
 
   rm -f /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
@@ -1454,7 +1486,7 @@ header(){
   done < "$DB"
   local s_ws=0 s_drop=0 s_ovpn=0 s_ssl=0 s_bad=0 s_squid=0 s_lim=0
   [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && s_ws=1
-  systemctl is-active --quiet dropbear 2>/dev/null && s_drop=1
+  drop_on && s_drop=1
   systemctl is-active --quiet openvpn@server 2>/dev/null && s_ovpn=1
   systemctl is-active --quiet stunnel4 2>/dev/null && s_ssl=1
   pgrep -x badvpn-udpgw >/dev/null && s_bad=1
