@@ -1019,7 +1019,7 @@ importar_usuarios(){
 
 estado_servicios(){
   banner "ESTADO DE SERVICIOS"
-  local svcs=(ssh fail2ban squid dropbear openvpn@server stunnel4 sslh jgx-limiter)
+  local svcs=(ssh fail2ban squid dropbear openvpn@server stunnel4 sslh jgx-limiter jgx-userbanner)
   for s in "${svcs[@]}"; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then
       printf " %-18s ${GREEN}%s${NC}\n" "$s" "ACTIVO"
@@ -1062,13 +1062,15 @@ desinstalar(){
   for u in $(systemctl list-units 'jgx-ws@*' 'jgx-badvpn@*' --all --no-legend 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" 2>/dev/null
   done
-  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn 2>/dev/null
+  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner 2>/dev/null
   rm -f /etc/systemd/system/jgx-ws@.service /etc/systemd/system/jgx-badvpn@.service \
-        /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service
+        /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service \
+        /etc/systemd/system/jgx-userbanner.service
   systemctl daemon-reload
 
   rm -f /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
   rm -f /etc/ssh/sshd_config.d/20-jgxeinz-group.conf
+  rm -f "$UB_CONF"
   systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
 
   rm -rf /etc/jgxeinz
@@ -1094,7 +1096,8 @@ herramientas(){
     echo -e "${YELLOW}[5]${NC} Importar usuarios del sistema"
     echo -e "${YELLOW}[6]${NC} Zona horaria"
     echo -e "${YELLOW}[7]${NC} Estado de servicios"
-    echo -e "${YELLOW}[8]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[8]${NC} Info de cuenta en el banner"
+    echo -e "${YELLOW}[9]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -1105,11 +1108,131 @@ herramientas(){
       5) importar_usuarios;;
       6) set_zona;;
       7) estado_servicios;;
-      8) desinstalar;;
+      8) userbanner_mgr;;
+      9) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
   done
+}
+
+# --------------------------------------------------------------
+#  BANNER POR USUARIO (usuario / dias restantes / conectados)
+# --------------------------------------------------------------
+# sshd manda el banner despues de recibir el nombre de usuario, asi que con
+# "Match User" cada cuenta puede ver su propio banner: el banner.txt de
+# siempre + sus datos. El servicio jgx-userbanner los regenera cada 10s.
+# No aplica a Dropbear (tiene un unico banner fijo).
+UB_CONF="/etc/ssh/sshd_config.d/30-jgxeinz-userbanners.conf"
+
+userbanner_write(){
+  local tmp; tmp=$(mktemp)
+  cat > "$tmp" <<'UB'
+#!/bin/bash
+DIR="/etc/jgxeinz"
+DB="$DIR/users.db"
+OUT="$DIR/banners"
+CONF="/etc/ssh/sshd_config.d/30-jgxeinz-userbanners.conf"
+mkdir -p "$OUT"
+while true; do
+  hoy=$(date -d "$(date +%F)" +%s)
+  match=$(mktemp)
+  declare -A vivos=()
+  while read -r user limite; do
+    [[ -z "$user" ]] && continue
+    id "$user" &>/dev/null || continue
+    vivos[$user]=1
+    exp=$(chage -l "$user" 2>/dev/null | awk -F: '/Account expires/{print $2}' | sed 's/^ *//')
+    if [[ -z "$exp" || "$exp" == "never" ]]; then
+      dias="Ilimitado"
+    else
+      d=$(( ( $(date -d "$exp" +%s 2>/dev/null || echo "$hoy") - hoy ) / 86400 ))
+      if (( d <= 0 )); then dias="Vencida"; elif (( d == 1 )); then dias="1 dia"; else dias="$d dias"; fi
+    fi
+    n=$(ps -u "$user" -o comm= 2>/dev/null | grep -cE 'sshd|dropbear')
+    f="$OUT/$user.txt"
+    {
+      [[ -f "$DIR/banner.txt" ]] && cat "$DIR/banner.txt"
+      echo "Usuario: $user"
+      echo "Dias restantes: $dias"
+      echo "Conectados: $n/${limite:--}"
+    } > "$f.tmp" && mv -f "$f.tmp" "$f"
+    printf 'Match User %s\n    Banner %s\n' "$user" "$f" >> "$match"
+  done < "$DB"
+  # borrar banners de usuarios que ya no existen
+  for f in "$OUT"/*.txt; do
+    [[ -e "$f" ]] || continue
+    u=$(basename "$f" .txt)
+    [[ -n "${vivos[$u]}" ]] || rm -f "$f"
+  done
+  unset vivos
+  # los Match solo cambian al crear/borrar usuarios: recien ahi se recarga sshd
+  if ! cmp -s "$match" "$CONF"; then
+    old=$(mktemp); cp -f "$CONF" "$old" 2>/dev/null
+    cp -f "$match" "$CONF"
+    if sshd -t 2>/dev/null; then
+      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
+    else
+      # config invalida: volver a la anterior para no romper el SSH
+      if [[ -s "$old" ]]; then cp -f "$old" "$CONF"; else rm -f "$CONF"; fi
+    fi
+    rm -f "$old"
+  fi
+  rm -f "$match"
+  sleep 10
+done
+UB
+  # solo reescribe (y reinicia) si el script cambio, ej. tras actualizar el panel
+  if ! cmp -s "$tmp" "$DIR/userbanner.sh"; then
+    mv -f "$tmp" "$DIR/userbanner.sh"; chmod +x "$DIR/userbanner.sh"
+    systemctl is-active --quiet jgx-userbanner 2>/dev/null && systemctl restart jgx-userbanner
+  else
+    rm -f "$tmp"
+  fi
+}
+
+userbanner_mgr(){
+  banner "INFO DE CUENTA EN EL BANNER"
+  if systemctl is-active --quiet jgx-userbanner 2>/dev/null; then
+    echo -e "Estado actual: ${GREEN}ACTIVADO${NC}\n"
+    read -rp "Desactivar? [s/n]: " r
+    if [[ "$r" =~ ^[sS]$ ]]; then
+      systemctl disable --now jgx-userbanner >/dev/null 2>&1
+      rm -f "$UB_CONF"; rm -rf "$DIR/banners"
+      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
+      echo -e "\n${GREEN}Desactivado. Se vuelve a mostrar solo el banner comun.${NC}"
+    fi
+  else
+    echo -e "Estado actual: ${RED}DESACTIVADO${NC}\n"
+    echo -e "Abajo de tu banner, cada usuario ve al conectar:"
+    echo -e "  ${CYAN}Usuario: muchachos${NC}"
+    echo -e "  ${CYAN}Dias restantes: 12 dias${NC}"
+    echo -e "  ${CYAN}Conectados: 5/15${NC}"
+    echo -e "\n${YELLOW}Se actualiza cada 10s. No aplica a Dropbear.${NC}\n"
+    read -rp "Activar? [s/n]: " r
+    if [[ "$r" =~ ^[sS]$ ]]; then
+      userbanner_write
+      cat > /etc/systemd/system/jgx-userbanner.service <<EOF
+[Unit]
+Description=JgXeinz banner por usuario
+After=network.target
+[Service]
+ExecStart=/bin/bash $DIR/userbanner.sh
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+      systemctl daemon-reload
+      systemctl enable --now jgx-userbanner >/dev/null 2>&1
+      sleep 2
+      if systemctl is-active --quiet jgx-userbanner && [[ -f "$UB_CONF" ]]; then
+        echo -e "\n${GREEN}Activado.${NC} Reconectate desde HTTP Custom para verlo."
+      else
+        echo -e "\n${RED}No se pudo activar. Revisa: journalctl -u jgx-userbanner${NC}"
+      fi
+    fi
+  fi
+  pause
 }
 
 limiter(){
@@ -1265,6 +1388,9 @@ mrow(){
   [[ -n "$nR" ]] && echo -ne "${YELLOW}[$nR]${NC} ${lR}"
   echo ""
 }
+
+# si el banner por usuario esta activo, su script queda al dia con esta version del panel
+systemctl is-enabled --quiet jgx-userbanner 2>/dev/null && userbanner_write
 
 while true; do
   banner
