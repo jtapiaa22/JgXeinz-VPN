@@ -945,16 +945,31 @@ actualizar(){
   fi
 }
 
+bar(){
+  local pct=${1:-0} width=16 filled empty b="" e="" col i
+  [[ "$pct" =~ ^[0-9]+$ ]] || pct=0
+  [[ $pct -gt 100 ]] && pct=100
+  filled=$(( pct * width / 100 )); empty=$(( width - filled ))
+  for ((i=0;i<filled;i++)); do b+="|"; done
+  for ((i=0;i<empty;i++)); do e+="-"; done
+  if [[ $pct -ge 85 ]]; then col=$RED; elif [[ $pct -ge 60 ]]; then col=$YELLOW; else col=$GREEN; fi
+  echo -ne "${col}[${b}${e}]${NC} ${pct}%"
+}
+
 header(){
-  local os up ip host disk cpu cores ram users online
+  local os up ip host cores users online
   os=$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")
   up=$(uptime -p 2>/dev/null | sed 's/^up //')
   ip=$(get_ip)
   host=$(cat "$DIR/domain" 2>/dev/null)
   cores=$(nproc 2>/dev/null)
-  cpu=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
-  disk=$(df -h / | awk 'NR==2{print $3" / "$2" (libre "$4")"}')
-  ram=$(free -m | awk '/Mem/{print $3"M / "$2"M (libre "$4"M)"}')
+  local load ram_u ram_t ram_pct disk_u disk_t disk_pct cpu_pct
+  load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+  read -r ram_u ram_t < <(free -m | awk '/Mem/{print $3, $2}')
+  ram_pct=$(( ram_t>0 ? ram_u*100/ram_t : 0 ))
+  read -r disk_u disk_t < <(df -h / | awk 'NR==2{print $3, $2}')
+  disk_pct=$(df / | awk 'NR==2{gsub("%","",$5); print $5}')
+  cpu_pct=$(awk -v l="$load" -v c="$cores" 'BEGIN{if(c<1)c=1; p=l/c*100; if(p>100)p=100; printf "%d", p}')
   users=$(grep -c . "$DB")
   online=0
   while read -r u _; do
@@ -973,9 +988,9 @@ header(){
   echo -e " ${WHITE}OS   :${NC} $os"
   echo -e " ${WHITE}UP   :${NC} $up"
   [[ -n "$host" ]] && echo -e " ${WHITE}IP   :${NC} $ip ${WHITE}/${NC} ${GREEN}$host${NC}" || echo -e " ${WHITE}IP   :${NC} $ip"
-  echo -e " ${WHITE}DISCO:${NC} $disk"
-  echo -e " ${WHITE}CPU  :${NC} carga $cpu   cores: $cores"
-  echo -e " ${WHITE}RAM  :${NC} $ram"
+  echo -e " ${WHITE}CPU  :${NC} $(bar "$cpu_pct")  carga $load / ${cores}c"
+  echo -e " ${WHITE}RAM  :${NC} $(bar "$ram_pct")  ${ram_u}M/${ram_t}M"
+  echo -e " ${WHITE}DISCO:${NC} $(bar "$disk_pct")  ${disk_u}/${disk_t}"
   echo -e "${BLUE}-----------------------------------------------${NC}"
   echo -e " ${WHITE}SERV :${NC} SSH:${GREEN}ON${NC} WS:$s_ws DROP:$s_drop OVPN:$s_ovpn SSL:$s_ssl SQUID:$s_squid BAD:$s_bad"
   echo -e " ${WHITE}CTAS :${NC} total:${GREEN}$users${NC}  online:${GREEN}$online${NC}  limiter:$s_lim"
