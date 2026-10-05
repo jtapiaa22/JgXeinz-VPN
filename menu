@@ -1034,40 +1034,66 @@ header(){
   h1=$(printf "%-22s" "SISTEMA");      h2=$(printf "%-20s" "MEMORIA RAM")
   o1=$(printf "%-22s" "Onlines: $online"); o2=$(printf "%-20s" "Expirados: $exp")
 
-  echo -e "${BLUE}======================================================${NC}"
-  echo -e " ${CYAN}${h1}${YELLOW}${h2}${GREEN}PROCESADOR${NC}"
-  printf "  %-21s %-19s %s\n" "OS: $os" "Total: $ram_h" "Nucleos: $cores"
-  printf "  %-21s %-19s %s\n" "Hora: $hora" "En uso: ${ram_pct}%" "En uso: ${cpu_pct}%"
-  echo -e "${BLUE}------------------------------------------------------${NC}"
-  echo -e "  ${WHITE}CPU  ${NC}$(bar "$cpu_pct")   ${WHITE}carga${NC} $load / ${cores}c"
-  echo -e "  ${WHITE}RAM  ${NC}$(bar "$ram_pct")   ${ram_u}M/${ram_t}M"
-  echo -e "  ${WHITE}DISCO${NC}$(bar "$disk_pct")   ${disk_u}/${disk_t}"
-  echo -e "${BLUE}------------------------------------------------------${NC}"
-  echo -e " ${GREEN}${o1}${YELLOW}${o2}${CYAN}Total: $users${NC}"
-  [[ -n "$host" ]] && echo -e "  ${WHITE}IP:${NC} $ip ${WHITE}/${NC} ${GREEN}$host${NC}" || echo -e "  ${WHITE}IP:${NC} $ip"
-  echo -e "  ${WHITE}SERV:${NC} SSH:${GREEN}ON${NC} WS:$s_ws DROP:$s_drop OVPN:$s_ovpn SSL:$s_ssl SQUID:$s_squid BAD:$s_bad LIM:$s_lim"
-  echo -e "${BLUE}======================================================${NC}"
+  echo -e "${BLUE}==========================================================${NC}"
+  echo ""
+  echo -e "   ${CYAN}${h1}${YELLOW}${h2}${GREEN}PROCESADOR${NC}"
+  printf "   %-21s %-19s %s\n" "OS: $os" "Total: $ram_h" "Nucleos: $cores"
+  printf "   %-21s %-19s %s\n" "Hora: $hora" "En uso: ${ram_pct}%" "En uso: ${cpu_pct}%"
+  echo ""
+  echo -e "${BLUE}   ------------------------------------------------------${NC}"
+  echo ""
+  echo -e "   ${WHITE}CPU  ${NC} $(bar "$cpu_pct")   ${WHITE}carga${NC} $load / ${cores}c"
+  echo -e "   ${WHITE}RAM  ${NC} $(bar "$ram_pct")   ${ram_u}M / ${ram_t}M"
+  echo -e "   ${WHITE}DISCO${NC} $(bar "$disk_pct")   ${disk_u} / ${disk_t}"
+  echo ""
+  echo -e "${BLUE}   ------------------------------------------------------${NC}"
+  echo ""
+  echo -e "   ${GREEN}${o1}${YELLOW}${o2}${CYAN}Total: $users${NC}"
+  echo ""
+  [[ -n "$host" ]] && echo -e "   ${WHITE}IP  :${NC} $ip ${WHITE}/${NC} ${GREEN}$host${NC}" || echo -e "   ${WHITE}IP  :${NC} $ip"
+  echo -e "   ${WHITE}SERV:${NC} SSH:${GREEN}ON${NC} WS:$s_ws DROP:$s_drop OVPN:$s_ovpn SSL:$s_ssl SQUID:$s_squid BAD:$s_bad LIM:$s_lim"
+  echo ""
+  echo -e "${BLUE}==========================================================${NC}"
 }
 
 # --------------------------------------------------------------
 #  MENU PRINCIPAL
 # --------------------------------------------------------------
+# fila de menu en 2 columnas parejas (el padding se hace sobre texto plano)
+mrow(){
+  local nL="$1" lL="$2" nR="$3" lR="$4" left
+  if [[ -n "$nL" ]]; then
+    left="${YELLOW}[$nL]${NC} $(printf '%-22s' "$lL")"
+  else
+    left="     $(printf '%-22s' '')"
+  fi
+  if [[ -n "$nR" ]]; then
+    echo -e "    ${left}${YELLOW}[$nR]${NC} ${lR}"
+  else
+    echo -e "    ${left}"
+  fi
+}
+
 while true; do
   banner
   systemctl is-active --quiet jgx-limiter 2>/dev/null && lim_st="${GREEN}ON${NC}" || lim_st="${RED}OFF${NC}"
   header
-  echo -e "${YELLOW}[01]${NC} Crear usuario       ${YELLOW}[08]${NC} Remover expirados"
-  echo -e "${YELLOW}[02]${NC} Usuario de prueba   ${YELLOW}[09]${NC} Reporte de usuarios"
-  echo -e "${YELLOW}[03]${NC} Remover usuario     ${YELLOW}[10]${NC} Modo de conexion"
-  echo -e "${YELLOW}[04]${NC} Monitor online      ${YELLOW}[11]${NC} Info del VPS"
-  echo -e "${YELLOW}[05]${NC} Cambiar fecha       ${YELLOW}[12]${NC} Backup"
-  echo -e "${YELLOW}[06]${NC} Cambiar limite      ${YELLOW}[13]${NC} Actualizar panel"
-  echo -e "${YELLOW}[07]${NC} Cambiar contrasena  ${YELLOW}[14]${NC} Limiter $lim_st"
-  echo -e "                         ${YELLOW}[15]${NC} Herramientas"
-  echo -e "                         ${YELLOW}[16]${NC} Datos de cuenta"
-  echo -e "                         ${YELLOW}[00]${NC} Salir"
-  echo -e "${BLUE}-----------------------------------------------${NC}"
-  read -rp "Opcion: " opt
+  echo ""
+  echo -e "                      ${WHITE}M E N U   P R I N C I P A L${NC}"
+  echo ""
+  mrow "01" "Crear usuario"      "08" "Remover expirados"
+  mrow "02" "Usuario de prueba"  "09" "Reporte de usuarios"
+  mrow "03" "Remover usuario"    "10" "Modo de conexion"
+  mrow "04" "Monitor online"     "11" "Info del VPS"
+  mrow "05" "Cambiar fecha"      "12" "Backup"
+  mrow "06" "Cambiar limite"     "13" "Actualizar panel"
+  mrow "07" "Cambiar contrasena" "14" "Limiter $lim_st"
+  mrow ""   ""                   "15" "Herramientas"
+  mrow ""   ""                   "16" "Datos de cuenta"
+  mrow ""   ""                   "00" "Salir"
+  echo ""
+  echo -e "${BLUE}==========================================================${NC}"
+  read -rp "  Opcion: " opt
   case $opt in
     1|01) crear_usuario;;
     2|02) crear_teste;;
