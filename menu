@@ -43,14 +43,21 @@ get_ip(){
 # nombre de usuario valido para linux (sin inyectar en sed/useradd)
 valid_user(){ [[ "$1" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; }
 
-# usuarios del sistema que NUNCA se tocan (root, admin de debian, ubuntu de aws, etc.)
+# nombres de cuentas del sistema que NUNCA se tocan (root, admin de debian, ubuntu de aws, etc.)
 is_system_user(){
   case "$1" in
-    root|ubuntu|admin|debian|ec2-user|nobody|daemon|bin|sys|sync) return 0;;
+    root|ubuntu|admin|debian|ec2-user|nobody|daemon|bin|sys|sync|systemd*|_*) return 0;;
   esac
-  # cualquiera que no este en el grupo del panel se considera del sistema
-  id -nG "$1" 2>/dev/null | tr ' ' '\n' | grep -qx "$VPN_GROUP" || return 0
   return 1
+}
+
+# todos los usuarios gestionables: UID >= 1000 reales, menos los de sistema.
+# incluye los del grupo jgxvpn y tambien los viejos que todavia no se importaron.
+all_panel_users(){
+  awk -F: '$3>=1000 && $3<65534 {print $1}' /etc/passwd | while read -r u; do
+    is_system_user "$u" && continue
+    echo "$u"
+  done
 }
 
 # cuenta conexiones activas de un usuario (sshd + dropbear)
@@ -196,14 +203,14 @@ crear_teste(){
 
 remover_usuario(){
   banner; echo -e "${WHITE} REMOVER USUARIO${NC}\n"
-  mapfile -t users < <(getent group "$VPN_GROUP" | awk -F: '{print $4}' | tr ',' '\n' | grep -v '^$')
-  [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios del panel${NC}"; pause; return; }
+  mapfile -t users < <(all_panel_users)
+  [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios${NC}"; pause; return; }
   local i=1
   for u in "${users[@]}"; do
     if grep -q "^$u " "$DB"; then
       echo -e "${YELLOW}[$i]${NC} $u"
     else
-      echo -e "${YELLOW}[$i]${NC} $u ${CYAN}(sin DB)${NC}"
+      echo -e "${YELLOW}[$i]${NC} $u ${CYAN}(ext)${NC}"
     fi
     ((i++))
   done
@@ -236,13 +243,15 @@ monitor_online(){
       n=$(conexiones "$user")
       uid=$(id -u "$user" 2>/dev/null)
       mb=$(echo "$ipt" | awk -v p="owner UID match $uid" '$0 ~ p {s+=$2} END{printf "%d", (s+0)/1048576}')
+      local tag=""
+      grep -q "^$user " "$DB" || tag=" ${CYAN}(ext)${NC}"
       if [[ "$n" -gt 0 ]]; then
-        printf " ${GREEN}%-15s %-9s %-7s %-8s${NC}\n" "$user" "ONLINE" "$n/$limite" "${mb}MB"
+        printf " ${GREEN}%-15s %-9s %-7s %-8s${NC}%b\n" "$user" "ONLINE" "$n/$limite" "${mb}MB" "$tag"
         on=$((on+1))
       else
-        printf " %-15s ${RED}%-9s${NC} %-7s %-8s\n" "$user" "offline" "0/$limite" "${mb}MB"
+        printf " %-15s ${RED}%-9s${NC} %-7s %-8s%b\n" "$user" "offline" "0/$limite" "${mb}MB" "$tag"
       fi
-    done < <(getent group "$VPN_GROUP" | awk -F: '{print $4}' | tr ',' '\n' | grep -v '^$')
+    done < <(all_panel_users)
     echo -e "${BLUE}-----------------------------------------------${NC}"
     echo -e " ${WHITE}Online: ${GREEN}$on${NC}   ${YELLOW}(se actualiza cada 3s - apreta 'q' para salir)${NC}"
     read -t 3 -n 1 -s k
