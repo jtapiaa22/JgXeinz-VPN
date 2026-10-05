@@ -708,22 +708,27 @@ EOF
 
 editar_banner(){
   banner; echo -e "${WHITE} BANNER (mensaje al conectar)${NC}\n"
+  local FS=$' '   # espacio invisible de ancho normal (no lo junta HTTP Custom)
   if [[ -f "$DIR/banner.txt" ]]; then
-    echo -e "Banner actual:\n${CYAN}$(cat "$DIR/banner.txt")${NC}\n"
+    # mostrar el actual con los invisibles convertidos a espacio real, para que se lea
+    echo -e "Banner actual:\n${CYAN}$(sed "s/$FS/ /g" "$DIR/banner.txt")${NC}\n"
   else
     echo -e "(todavia no hay banner)\n"
   fi
-  echo -e "Escribi el nuevo mensaje. Para terminar, una linea con solo: ${YELLOW}END${NC}\n"
+  echo -e "${YELLOW}Escribi o pega tu banner.${NC} Los espacios para alinear/centrar se"
+  echo -e "respetan solos (se convierten a invisibles para que HTTP Custom no los junte)."
+  echo -e "Podes pegar arte ASCII tal cual. Para terminar: una linea con solo ${YELLOW}END${NC}\n"
   local tmp; tmp=$(mktemp)
   while IFS= read -r line; do
     [[ "$line" == "END" ]] && break
-    echo "$line" >> "$tmp"
+    # convertir cada espacio normal al invisible (asi sobrevive en la app)
+    echo "${line// /$FS}" >> "$tmp"
   done
   [[ ! -s "$tmp" ]] && { rm -f "$tmp"; echo -e "${RED}Sin cambios${NC}"; pause; return; }
   mv "$tmp" "$DIR/banner.txt"
   echo "Banner $DIR/banner.txt" > /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
   systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-  echo -e "\n${GREEN}Banner actualizado${NC}"; pause
+  echo -e "\n${GREEN}Banner actualizado y aplicado.${NC} Reconectate para verlo."; pause
 }
 
 dropbear(){
@@ -1031,14 +1036,14 @@ header(){
 
   # --- cabeceras de columna (padding sobre texto plano, luego color) ---
   local h1 h2 o1 o2
-  h1=$(printf "%-22s" "SISTEMA");      h2=$(printf "%-20s" "MEMORIA RAM")
-  o1=$(printf "%-22s" "Onlines: $online"); o2=$(printf "%-20s" "Expirados: $exp")
+  h1=$(printf "%-23s" "SISTEMA");      h2=$(printf "%-20s" "MEMORIA RAM")
+  o1=$(printf "%-23s" "Onlines: $online"); o2=$(printf "%-20s" "Expirados: $exp")
 
   echo -e "${BLUE}==========================================================${NC}"
   echo ""
   echo -e "   ${CYAN}${h1}${YELLOW}${h2}${GREEN}PROCESADOR${NC}"
-  printf "   %-21s %-19s %s\n" "OS: $os" "Total: $ram_h" "Nucleos: $cores"
-  printf "   %-21s %-19s %s\n" "Hora: $hora" "En uso: ${ram_pct}%" "En uso: ${cpu_pct}%"
+  printf "   %-22s %-19s %s\n" "OS: $os" "Total: $ram_h" "Nucleos: $cores"
+  printf "   %-22s %-19s %s\n" "Hora: $hora" "En uso: ${ram_pct}%" "En uso: ${cpu_pct}%"
   echo ""
   echo -e "${BLUE}   ------------------------------------------------------${NC}"
   echo ""
