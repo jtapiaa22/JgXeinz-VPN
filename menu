@@ -994,24 +994,31 @@ bar(){
 }
 
 header(){
-  local os up ip host cores users online
+  local os up ip host cores users online hora ram_h exp
   os=$(. /etc/os-release 2>/dev/null; echo "$PRETTY_NAME")
   up=$(uptime -p 2>/dev/null | sed 's/^up //')
+  hora=$(date +%T)
   ip=$(get_ip)
   host=$(cat "$DIR/domain" 2>/dev/null)
   cores=$(nproc 2>/dev/null)
   local load ram_u ram_t ram_pct disk_u disk_t disk_pct cpu_pct
   load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
   read -r ram_u ram_t < <(free -m | awk '/Mem/{print $3, $2}')
+  ram_h=$(free -h | awk '/Mem/{print $2}')
   ram_pct=$(( ram_t>0 ? ram_u*100/ram_t : 0 ))
   read -r disk_u disk_t < <(df -h / | awk 'NR==2{print $3, $2}')
   disk_pct=$(df / | awk 'NR==2{gsub("%","",$5); print $5}')
   cpu_pct=$(awk -v l="$load" -v c="$cores" 'BEGIN{if(c<1)c=1; p=l/c*100; if(p>100)p=100; printf "%d", p}')
   users=$(grep -c . "$DB")
-  online=0
+  online=0; exp=0
+  local now; now=$(date +%s)
   while read -r u _; do
     [[ -z "$u" ]] && continue
     [[ $(ps -u "$u" 2>/dev/null | grep -c sshd) -gt 0 ]] && online=$((online+1))
+    local ed; ed=$(chage -l "$u" 2>/dev/null | awk -F: '/Account expires/{print $2}' | sed 's/^ *//')
+    [[ -z "$ed" || "$ed" == "never" ]] && continue
+    local es; es=$(date -d "$ed" +%s 2>/dev/null) || continue
+    [[ -n "$es" && "$es" -lt "$now" ]] && exp=$((exp+1))
   done < "$DB"
   local s_ws s_drop s_ovpn s_ssl s_bad s_squid s_lim
   [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && s_ws="${GREEN}ON${NC}" || s_ws="${RED}OFF${NC}"
@@ -1021,17 +1028,25 @@ header(){
   pgrep -x badvpn-udpgw >/dev/null && s_bad="${GREEN}ON${NC}" || s_bad="${RED}OFF${NC}"
   systemctl is-active --quiet squid 2>/dev/null && s_squid="${GREEN}ON${NC}" || s_squid="${RED}OFF${NC}"
   systemctl is-active --quiet jgx-limiter 2>/dev/null && s_lim="${GREEN}ON${NC}" || s_lim="${RED}OFF${NC}"
-  echo -e "${BLUE}-----------------------------------------------${NC}"
-  echo -e " ${WHITE}OS   :${NC} $os"
-  echo -e " ${WHITE}UP   :${NC} $up"
-  [[ -n "$host" ]] && echo -e " ${WHITE}IP   :${NC} $ip ${WHITE}/${NC} ${GREEN}$host${NC}" || echo -e " ${WHITE}IP   :${NC} $ip"
-  echo -e " ${WHITE}CPU  :${NC} $(bar "$cpu_pct")  carga $load / ${cores}c"
-  echo -e " ${WHITE}RAM  :${NC} $(bar "$ram_pct")  ${ram_u}M/${ram_t}M"
-  echo -e " ${WHITE}DISCO:${NC} $(bar "$disk_pct")  ${disk_u}/${disk_t}"
-  echo -e "${BLUE}-----------------------------------------------${NC}"
-  echo -e " ${WHITE}SERV :${NC} SSH:${GREEN}ON${NC} WS:$s_ws DROP:$s_drop OVPN:$s_ovpn SSL:$s_ssl SQUID:$s_squid BAD:$s_bad"
-  echo -e " ${WHITE}CTAS :${NC} total:${GREEN}$users${NC}  online:${GREEN}$online${NC}  limiter:$s_lim"
-  echo -e "${BLUE}-----------------------------------------------${NC}"
+
+  # --- cabeceras de columna (padding sobre texto plano, luego color) ---
+  local h1 h2 o1 o2
+  h1=$(printf "%-22s" "SISTEMA");      h2=$(printf "%-20s" "MEMORIA RAM")
+  o1=$(printf "%-22s" "Onlines: $online"); o2=$(printf "%-20s" "Expirados: $exp")
+
+  echo -e "${BLUE}======================================================${NC}"
+  echo -e " ${CYAN}${h1}${YELLOW}${h2}${GREEN}PROCESADOR${NC}"
+  printf "  %-21s %-19s %s\n" "OS: $os" "Total: $ram_h" "Nucleos: $cores"
+  printf "  %-21s %-19s %s\n" "Hora: $hora" "En uso: ${ram_pct}%" "En uso: ${cpu_pct}%"
+  echo -e "${BLUE}------------------------------------------------------${NC}"
+  echo -e "  ${WHITE}CPU  ${NC}$(bar "$cpu_pct")   ${WHITE}carga${NC} $load / ${cores}c"
+  echo -e "  ${WHITE}RAM  ${NC}$(bar "$ram_pct")   ${ram_u}M/${ram_t}M"
+  echo -e "  ${WHITE}DISCO${NC}$(bar "$disk_pct")   ${disk_u}/${disk_t}"
+  echo -e "${BLUE}------------------------------------------------------${NC}"
+  echo -e " ${GREEN}${o1}${YELLOW}${o2}${CYAN}Total: $users${NC}"
+  [[ -n "$host" ]] && echo -e "  ${WHITE}IP:${NC} $ip ${WHITE}/${NC} ${GREEN}$host${NC}" || echo -e "  ${WHITE}IP:${NC} $ip"
+  echo -e "  ${WHITE}SERV:${NC} SSH:${GREEN}ON${NC} WS:$s_ws DROP:$s_drop OVPN:$s_ovpn SSL:$s_ssl SQUID:$s_squid BAD:$s_bad LIM:$s_lim"
+  echo -e "${BLUE}======================================================${NC}"
 }
 
 # --------------------------------------------------------------
