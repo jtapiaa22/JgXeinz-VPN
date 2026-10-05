@@ -514,6 +514,7 @@ modo_conexion(){
     st_ssh="${GREEN}◉${NC}"
     systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}◉${NC}" || st_squid="${RED}○${NC}"
     systemctl is-active --quiet dropbear 2>/dev/null && st_drop="${GREEN}◉${NC}" || st_drop="${RED}○${NC}"
+    systemctl is-active --quiet openvpn@server 2>/dev/null && st_ovpn="${GREEN}◉${NC}" || st_ovpn="${RED}○${NC}"
     [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && st_ws="${GREEN}◉${NC}" || st_ws="${RED}○${NC}"
     systemctl is-active --quiet stunnel4 2>/dev/null && st_ssl="${GREEN}◉${NC}" || st_ssl="${RED}○${NC}"
     systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}◉${NC}" || st_sslh="${RED}○${NC}"
@@ -524,7 +525,7 @@ modo_conexion(){
     echo -e "${YELLOW}[01]${NC} OPENSSH             $st_ssh"
     echo -e "${YELLOW}[02]${NC} SQUID PROXY         $st_squid"
     echo -e "${YELLOW}[03]${NC} DROPBEAR            $st_drop"
-    echo -e "${YELLOW}[04]${NC} OPENVPN             ${CYAN}proximamente${NC}"
+    echo -e "${YELLOW}[04]${NC} OPENVPN             $st_ovpn"
     echo -e "${YELLOW}[05]${NC} PROXY SOCKS / WS    $st_ws"
     echo -e "${YELLOW}[06]${NC} SSL TUNNEL          $st_ssl"
     echo -e "${YELLOW}[07]${NC} SSLH MULTIPLEX      $st_sslh"
@@ -538,7 +539,7 @@ modo_conexion(){
       1|01) ssh_ports_mgr;;
       2|02) squid_mgr;;
       3|03) dropbear;;
-      4|04) echo -e "\n${CYAN}OpenVPN: lo armamos en una pasada dedicada${NC}"; sleep 2;;
+      4|04) openvpn_mgr;;
       5|05) ws_mgr;;
       6|06) ssl_tunnel_mgr;;
       7|07) sslh_mgr;;
