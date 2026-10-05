@@ -804,6 +804,48 @@ set_dominio(){
   esac
 }
 
+desinstalar(){
+  banner; echo -e "${RED} DESINSTALAR JgXeinz VPN${NC}\n"
+  echo -e "${YELLOW}Esto quita el panel, sus servicios y el comando 'menu'.${NC}"
+  echo -e "${YELLOW}No se puede deshacer.${NC}\n"
+  read -rp "Escribi SI (en mayuscula) para confirmar: " c
+  [[ "$c" != "SI" ]] && { echo -e "\n${GREEN}Cancelado${NC}"; pause; return; }
+
+  echo ""
+  read -rp "Borrar tambien los usuarios creados por el panel? [s/n]: " du
+  if [[ "$du" =~ ^[sS]$ ]]; then
+    while read -r u _; do
+      [[ -z "$u" ]] && continue
+      pkill -u "$u" 2>/dev/null; userdel --force "$u" 2>/dev/null
+    done < "$DB"
+    echo -e "${GREEN}Usuarios eliminados${NC}"
+  fi
+
+  echo -e "\n${YELLOW}Removiendo servicios y archivos...${NC}"
+  for u in $(systemctl list-units 'jgx-ws@*' 'jgx-badvpn@*' --all --no-legend 2>/dev/null | awk '{print $1}'); do
+    systemctl disable --now "$u" 2>/dev/null
+  done
+  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn 2>/dev/null
+  rm -f /etc/systemd/system/jgx-ws@.service /etc/systemd/system/jgx-badvpn@.service \
+        /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service
+  systemctl daemon-reload
+
+  rm -f /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
+  systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
+
+  rm -rf /etc/jgxeinz
+  rm -f /usr/bin/menu
+
+  clear
+  echo -e "${GREEN}JgXeinz VPN desinstalado.${NC}\n"
+  echo -e "${YELLOW}Nota: Dropbear, Squid, SSL Tunnel, SSLH, OpenVPN y el binario badvpn"
+  echo -e "quedan instalados (si los querés sacar, se hace a mano).${NC}"
+  echo -e "${YELLOW}El login por contrasena del SSH queda activado.${NC}\n"
+  echo -e "${CYAN}Para reinstalar, corré el install.sh de nuevo.${NC}"
+  sleep 1
+  exit 0
+}
+
 herramientas(){
   while true; do
     banner; echo -e "${WHITE} HERRAMIENTAS${NC}\n"
@@ -811,6 +853,7 @@ herramientas(){
     echo -e "${YELLOW}[2]${NC} Banner / mensaje de conexion"
     echo -e "${YELLOW}[3]${NC} Trafico por usuario"
     echo -e "${YELLOW}[4]${NC} Dominio del servidor"
+    echo -e "${YELLOW}[5]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -818,6 +861,7 @@ herramientas(){
       2) editar_banner;;
       3) trafico;;
       4) set_dominio;;
+      5) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
