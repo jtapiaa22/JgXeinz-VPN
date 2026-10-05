@@ -72,9 +72,26 @@ conexiones(){ ps -u "$1" 2>/dev/null | grep -cE 'sshd|dropbear'; }
 # barra de titulo: nombre + version a la izquierda, seccion actual a la derecha.
 # banner "TITULO" -> pantalla de una seccion (deja una linea libre abajo,
 # salvo que se pase un 2do argumento: banner "TITULO" pegado)
+# logo compacto de 3 lineas (55 columnas). Si cambias PANEL_NAME,
+# este dibujo no cambia solo: hay que redibujarlo a mano.
+LOGO=(
+"   █ ▄▀▀▀ ▀▄ ▄▀ █▀▀▀ ▀█▀ █▄  █ ▀▀▀█▀    █   █ █▀▀▄ █▄  █"
+"▄  █ █ ▀█  ▄▀▄  █▀▀   █  █ ▀▄█  ▄▀      ▀▄ ▄▀ █▀▀  █ ▀▄█"
+" ▀▀   ▀▀▀ ▀   ▀ ▀▀▀▀ ▀▀▀ ▀   ▀ ▀▀▀▀▀      ▀   ▀    ▀   ▀"
+)
+
 banner(){
   clear
-  local ver="v$VERSION" right="${1:-PANEL DE ADMINISTRACION}" pad
+  if [[ -z "$1" ]]; then
+    # pantalla principal: logo + subtitulo con la version a la derecha
+    local sub="PANEL DE ADMINISTRACION" ver="v$VERSION"
+    hr
+    local l; for l in "${LOGO[@]}"; do echo -e "  ${CYAN}${l}${NC}"; done
+    printf " ${GRAY}%s%*s%s${NC}\n" "$sub" $(( UI_W - ${#sub} - ${#ver} - 2 )) "" "$ver"
+    hr
+    return
+  fi
+  local ver="v$VERSION" right="$1" pad
   pad=$(( UI_W - ${#PANEL_NAME} - ${#ver} - ${#right} - 3 ))
   (( pad < 1 )) && pad=1
   hr
