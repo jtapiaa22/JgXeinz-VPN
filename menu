@@ -180,10 +180,11 @@ monitor_online(){
     printf "${WHITE} %-15s %-9s %-7s %-8s${NC}\n" "USUARIO" "ESTADO" "CONEX" "DATOS"
     echo -e "${BLUE}-----------------------------------------------${NC}"
     local ipt on=0; ipt=$(iptables -L OUTPUT -v -n -x 2>/dev/null)
-    while read -r user limite; do
+    while read -r user; do
       [[ -z "$user" ]] && continue
-      [[ -z "$limite" ]] && limite=1
-      local n uid mb; n=$(ps -u "$user" 2>/dev/null | grep -c sshd)
+      local limite n uid mb
+      limite=$(awk -v u="$user" '$1==u{print $2}' "$DB"); [[ -z "$limite" ]] && limite="-"
+      n=$(ps -u "$user" 2>/dev/null | grep -c sshd)
       uid=$(id -u "$user" 2>/dev/null)
       mb=$(echo "$ipt" | awk -v p="owner UID match $uid" '$0 ~ p {s+=$2} END{printf "%d", (s+0)/1048576}')
       if [[ "$n" -gt 0 ]]; then
@@ -192,7 +193,7 @@ monitor_online(){
       else
         printf " %-15s ${RED}%-9s${NC} %-7s %-8s\n" "$user" "offline" "0/$limite" "${mb}MB"
       fi
-    done < "$DB"
+    done < <(awk -F: '$3>=1000 && $1!="nobody" && $1!="ubuntu" {print $1}' /etc/passwd)
     echo -e "${BLUE}-----------------------------------------------${NC}"
     echo -e " ${WHITE}Online: ${GREEN}$on${NC}   ${YELLOW}(se actualiza cada 3s - apreta 'q' para salir)${NC}"
     read -t 3 -n 1 -s k
@@ -887,7 +888,8 @@ herramientas(){
     echo -e "${YELLOW}[2]${NC} Banner / mensaje de conexion"
     echo -e "${YELLOW}[3]${NC} Trafico por usuario"
     echo -e "${YELLOW}[4]${NC} Dominio del servidor"
-    echo -e "${YELLOW}[5]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[5]${NC} Importar usuarios del sistema"
+    echo -e "${YELLOW}[6]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -895,7 +897,8 @@ herramientas(){
       2) editar_banner;;
       3) trafico;;
       4) set_dominio;;
-      5) desinstalar;;
+      5) importar_usuarios;;
+      6) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
