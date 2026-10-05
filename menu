@@ -215,6 +215,7 @@ Restart=always
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
+  systemctl reset-failed jgx-ws@"$p" 2>/dev/null
   systemctl enable --now jgx-ws@"$p" >/dev/null 2>&1
   sleep 1
   if ss -tlnp 2>/dev/null | grep -q ":$p "; then
@@ -249,43 +250,184 @@ EOF
   fi
 }
 
+ssh_ports_mgr(){
+  while true; do
+    banner; echo -e "${WHITE} OPENSSH${NC}\n"
+    echo -e " Puertos SSH: ${GREEN}$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Agregar puerto"
+    echo -e "${YELLOW}[2]${NC} Quitar puerto"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1) read -rp "Puerto a agregar: " p
+         [[ "$p" =~ ^[0-9]+$ ]] && { echo "Port $p" >> /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; echo -e "${GREEN}Agregado. Abrilo en AWS.${NC}"; } || echo -e "${RED}Invalido${NC}"; pause;;
+      2) read -rp "Puerto a quitar: " p
+         sed -i "/^Port $p\$/d" /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; echo -e "${GREEN}Listo${NC}"; pause;;
+      0) break;;
+    esac
+  done
+}
+
+ws_mgr(){
+  while true; do
+    banner; echo -e "${WHITE} PROXY SOCKS / WEBSOCKET${NC}\n"
+    local ports; ports=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | xargs)
+    echo -e " Puertos activos: ${GREEN}${ports:-ninguno}${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Activar en un puerto"
+    echo -e "${YELLOW}[2]${NC} Desactivar un puerto"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1) read -rp "Puerto: " p; [[ "$p" =~ ^[0-9]+$ ]] && ws_on "$p" || echo -e "${RED}Puerto invalido${NC}"; pause;;
+      2) read -rp "Puerto a desactivar: " p; systemctl disable --now jgx-ws@"$p" >/dev/null 2>&1; echo -e "${GREEN}Desactivado${NC}"; pause;;
+      0) break;;
+    esac
+  done
+}
+
+badvpn_mgr(){
+  banner; echo -e "${WHITE} BADVPN UDPGW${NC}\n"
+  if pgrep -x badvpn-udpgw >/dev/null; then
+    echo -e "Estado: ${GREEN}ACTIVADO${NC}  (127.0.0.1:$UDPGW_PORT)\n"
+    read -rp "Desactivar? [s/n]: " r
+    [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now jgx-badvpn >/dev/null 2>&1; echo -e "${GREEN}BadVPN desactivado${NC}"; }
+  else
+    echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
+    read -rp "Activar BadVPN (para voz/UDP)? [s/n]: " r
+    [[ "$r" =~ ^[sS]$ ]] && badvpn_on
+  fi
+  pause
+}
+
+squid_mgr(){
+  banner; echo -e "${WHITE} SQUID PROXY${NC}\n"
+  if systemctl is-active --quiet squid 2>/dev/null; then
+    local sp; sp=$(ss -tlnp 2>/dev/null | grep squid | grep -oP ':\K[0-9]+' | sort -u | xargs)
+    echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puertos: ${GREEN}$sp${NC}\n"
+    read -rp "Desactivar Squid? [s/n]: " r
+    [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now squid >/dev/null 2>&1; echo -e "${GREEN}Squid desactivado${NC}"; }
+  else
+    echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
+    read -rp "Puertos para Squid (ej: 8080 3128): " ports
+    [[ -z "$ports" ]] && { echo -e "${RED}Sin puertos${NC}"; pause; return; }
+    command -v squid >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando squid...${NC}"; apt-get install -y squid >/dev/null 2>&1; }
+    local ip; ip=$(get_ip)
+    {
+      echo "acl conectar method CONNECT"
+      echo "acl selfdst dst 127.0.0.1/32 $ip/32"
+      echo "http_access allow conectar selfdst"
+      echo "http_access deny all"
+      for p in $ports; do echo "http_port $p"; done
+      echo "visible_hostname JgXeinz"
+      echo "via off"
+      echo "forwarded_for off"
+    } > /etc/squid/squid.conf
+    systemctl enable squid >/dev/null 2>&1
+    systemctl restart squid >/dev/null 2>&1
+    systemctl is-active --quiet squid \
+      && echo -e "\n${GREEN}Squid activo en: $ports (abrilos en AWS)${NC}" \
+      || echo -e "\n${RED}No se pudo activar${NC}"
+  fi
+  pause
+}
+
+ssl_tunnel_mgr(){
+  banner; echo -e "${WHITE} SSL TUNNEL (stunnel)${NC}\n"
+  if systemctl is-active --quiet stunnel4 2>/dev/null; then
+    local sp; sp=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+' | xargs)
+    echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$sp${NC}\n"
+    read -rp "Desactivar SSL Tunnel? [s/n]: " r
+    [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now stunnel4 >/dev/null 2>&1; echo -e "${GREEN}Desactivado${NC}"; }
+  else
+    echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
+    read -rp "Puerto para SSL Tunnel [443]: " p
+    [[ -z "$p" ]] && p=443
+    [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; return; }
+    command -v stunnel4 >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando stunnel...${NC}"; apt-get install -y stunnel4 >/dev/null 2>&1; }
+    [[ ! -f /etc/stunnel/stunnel.pem ]] && openssl req -new -x509 -days 1095 -nodes -subj "/CN=JgXeinz" -out /etc/stunnel/stunnel.pem -keyout /etc/stunnel/stunnel.pem >/dev/null 2>&1
+    cat > /etc/stunnel/stunnel.conf <<EOF
+pid = /var/run/stunnel4.pid
+cert = /etc/stunnel/stunnel.pem
+[ssh]
+accept = $p
+connect = 127.0.0.1:22
+EOF
+    sed -i 's/^ENABLED=0/ENABLED=1/' /etc/default/stunnel4 2>/dev/null
+    systemctl enable stunnel4 >/dev/null 2>&1
+    systemctl restart stunnel4 >/dev/null 2>&1
+    systemctl is-active --quiet stunnel4 \
+      && echo -e "\n${GREEN}SSL Tunnel activo en el puerto $p (abrilo en AWS)${NC}" \
+      || echo -e "\n${RED}No se pudo activar${NC}"
+  fi
+  pause
+}
+
+sslh_mgr(){
+  banner; echo -e "${WHITE} SSLH MULTIPLEX${NC}\n"
+  if systemctl is-active --quiet sslh 2>/dev/null; then
+    echo -e "Estado: ${GREEN}ACTIVADO${NC}\n"
+    read -rp "Desactivar SSLH? [s/n]: " r
+    [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now sslh >/dev/null 2>&1; echo -e "${GREEN}Desactivado${NC}"; }
+  else
+    echo -e "Un solo puerto que reparte SSH / SSL / HTTP.\n"
+    read -rp "Puerto para SSLH [443]: " p
+    [[ -z "$p" ]] && p=443
+    [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; return; }
+    command -v sslh >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando sslh...${NC}"; apt-get install -y sslh >/dev/null 2>&1; }
+    local sslp; sslp=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+' | head -1)
+    mkdir -p /var/run/sslh
+    cat > /etc/default/sslh <<EOF
+RUN=yes
+DAEMON=/usr/sbin/sslh
+DAEMON_OPTS="--user sslh --listen 0.0.0.0:$p --ssh 127.0.0.1:22 --tls 127.0.0.1:${sslp:-444} --http 127.0.0.1:80 --pidfile /var/run/sslh/sslh.pid"
+EOF
+    systemctl enable sslh >/dev/null 2>&1
+    systemctl restart sslh >/dev/null 2>&1
+    systemctl is-active --quiet sslh \
+      && echo -e "\n${GREEN}SSLH activo en el puerto $p (abrilo en AWS)${NC}" \
+      || echo -e "\n${RED}No se pudo activar (puede que el puerto este ocupado)${NC}"
+  fi
+  pause
+}
+
 modo_conexion(){
   while true; do
     banner
-    local ssh_ports ws_cnt bad_st
-    ssh_ports=$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)
-    [[ -z "$ssh_ports" ]] && ssh_ports="22"
-    ws_cnt=$(ss -tlnp 2>/dev/null | grep -c python3)
-    pgrep -x badvpn-udpgw >/dev/null && bad_st="${GREEN}ON${NC}" || bad_st="${RED}OFF${NC}"
-    local ws_st; [[ "$ws_cnt" -gt 0 ]] && ws_st="${GREEN}ON${NC}" || ws_st="${RED}OFF${NC}"
-    echo -e "${WHITE} MODO DE CONEXION${NC}\n"
-    echo -e " SSH   puertos : ${GREEN}$ssh_ports${NC}"
-    echo -e " WebSocket     : $ws_st"
-    echo -e " BadVPN UDPGW  : $bad_st"
-    echo ""
-    echo -e "${YELLOW}[1]${NC} Agregar puerto SSH"
-    echo -e "${YELLOW}[2]${NC} Quitar puerto SSH"
-    echo -e "${YELLOW}[3]${NC} Activar WebSocket en un puerto"
-    echo -e "${YELLOW}[4]${NC} Desactivar un WebSocket"
-    echo -e "${YELLOW}[5]${NC} Activar BadVPN (UDPGW) para voz/UDP"
-    echo -e "${YELLOW}[6]${NC} Desactivar BadVPN"
-    echo -e "${YELLOW}[0]${NC} Volver"
+    local st_ssh st_squid st_drop st_ws st_ssl st_sslh st_bad
+    st_ssh="${GREEN}◉${NC}"
+    systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}◉${NC}" || st_squid="${RED}○${NC}"
+    systemctl is-active --quiet dropbear 2>/dev/null && st_drop="${GREEN}◉${NC}" || st_drop="${RED}○${NC}"
+    [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && st_ws="${GREEN}◉${NC}" || st_ws="${RED}○${NC}"
+    systemctl is-active --quiet stunnel4 2>/dev/null && st_ssl="${GREEN}◉${NC}" || st_ssl="${RED}○${NC}"
+    systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}◉${NC}" || st_sslh="${RED}○${NC}"
+    pgrep -x badvpn-udpgw >/dev/null && st_bad="${GREEN}◉${NC}" || st_bad="${RED}○${NC}"
+    echo -e "${WHITE} MODO DE CONEXION${NC}"
+    echo -e " SSH: ${GREEN}$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
+    echo -e "${BLUE}-----------------------------------------------${NC}"
+    echo -e "${YELLOW}[01]${NC} OPENSSH             $st_ssh"
+    echo -e "${YELLOW}[02]${NC} SQUID PROXY         $st_squid"
+    echo -e "${YELLOW}[03]${NC} DROPBEAR            $st_drop"
+    echo -e "${YELLOW}[04]${NC} OPENVPN             ${CYAN}proximamente${NC}"
+    echo -e "${YELLOW}[05]${NC} PROXY SOCKS / WS    $st_ws"
+    echo -e "${YELLOW}[06]${NC} SSL TUNNEL          $st_ssl"
+    echo -e "${YELLOW}[07]${NC} SSLH MULTIPLEX      $st_sslh"
+    echo -e "${YELLOW}[08]${NC} SLOWDNS             ${CYAN}proximamente${NC}"
+    echo -e "${YELLOW}[09]${NC} BADVPN UDPGW        $st_bad"
+    echo -e "${YELLOW}[00]${NC} Volver"
+    echo -e "${BLUE}-----------------------------------------------${NC}"
     echo ""
     read -rp "Opcion: " op
     case $op in
-      1) read -rp "Puerto SSH a agregar: " p
-         [[ "$p" =~ ^[0-9]+$ ]] && { echo "Port $p" >> /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null; echo -e "${GREEN}Puerto $p agregado. Abrilo tambien en AWS.${NC}"; } || echo -e "${RED}Puerto invalido${NC}"
-         pause;;
-      2) read -rp "Puerto SSH a quitar: " p
-         sed -i "/^Port $p\$/d" /etc/ssh/sshd_config; systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null
-         echo -e "${GREEN}Listo${NC}"; pause;;
-      3) read -rp "Puerto para WebSocket: " p
-         [[ "$p" =~ ^[0-9]+$ ]] && ws_on "$p" || echo -e "${RED}Puerto invalido${NC}"; pause;;
-      4) read -rp "Puerto WebSocket a desactivar: " p
-         systemctl disable --now jgx-ws@"$p" >/dev/null 2>&1; echo -e "${GREEN}Desactivado${NC}"; pause;;
-      5) badvpn_on; pause;;
-      6) systemctl disable --now jgx-badvpn >/dev/null 2>&1; echo -e "${GREEN}BadVPN desactivado${NC}"; pause;;
-      0) break;;
+      1|01) ssh_ports_mgr;;
+      2|02) squid_mgr;;
+      3|03) dropbear;;
+      4|04) echo -e "\n${CYAN}OpenVPN: lo armamos en una pasada dedicada${NC}"; sleep 2;;
+      5|05) ws_mgr;;
+      6|06) ssl_tunnel_mgr;;
+      7|07) sslh_mgr;;
+      8|08) echo -e "\n${CYAN}SlowDNS: lo armamos en una pasada dedicada${NC}"; sleep 2;;
+      9|09) badvpn_mgr;;
+      0|00) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
   done
@@ -468,15 +610,13 @@ herramientas(){
     banner; echo -e "${WHITE} HERRAMIENTAS${NC}\n"
     echo -e "${YELLOW}[1]${NC} Optimizar red (BBR)"
     echo -e "${YELLOW}[2]${NC} Banner / mensaje de conexion"
-    echo -e "${YELLOW}[3]${NC} Dropbear (otro SSH)"
-    echo -e "${YELLOW}[4]${NC} Trafico por usuario"
+    echo -e "${YELLOW}[3]${NC} Trafico por usuario"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
       1) optimizar;;
       2) editar_banner;;
-      3) dropbear;;
-      4) trafico;;
+      3) trafico;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
