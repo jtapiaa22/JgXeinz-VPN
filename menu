@@ -1134,7 +1134,37 @@ DB="$DIR/users.db"
 OUT="$DIR/banners"
 CONF="/etc/ssh/sshd_config.d/30-jgxeinz-userbanners.conf"
 mkdir -p "$OUT"
+# sin esto, en bash 5.2 el '&' del reemplazo de ${x//a/b} es "lo encontrado"
+shopt -u patsub_replacement 2>/dev/null
+
+# paleta (HTTP Custom interpreta <font color> en el mensaje del servidor)
+C_SEP="#00B4D8"; C_TXT="#FFD166"; C_LBL="#AAB4BE"
+C_OK="#06D6A0"; C_WARN="#FFD166"; C_BAD="#EF476F"
+
+esc(){ local s="${1//&/&amp;}"; s="${s//</&lt;}"; echo "${s//>/&gt;}"; }
+font(){ echo "<font color=\"$1\">$(esc "$2")</font>"; }
+dato(){ echo "$(font "$C_LBL" "$1:") $(font "$2" "$3")"; }
+
+# banner base coloreado: el logo (lineas con bloques/bordes) queda blanco,
+# los separadores "====" en un color y el resto del texto en otro
+base_color(){
+  local line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ "$line" == *█* || "$line" == *╗* || "$line" == *╝* || "$line" == *║* ]]; then
+      esc "$line"
+    elif [[ "$line" =~ ^[[:space:]=_-]+$ && "$line" =~ [=_-] ]]; then
+      font "$C_SEP" "$line"
+    elif [[ "$line" =~ [^[:space:]] ]]; then
+      font "$C_TXT" "$line"
+    else
+      echo "$line"
+    fi
+  done < "$DIR/banner.txt"
+}
+
 while true; do
+  color=1; [[ "$(cat "$DIR/banner_color" 2>/dev/null)" == "off" ]] && color=0
   hoy=$(date -d "$(date +%F)" +%s)
   match=$(mktemp)
   declare -A vivos=()
@@ -1144,18 +1174,32 @@ while true; do
     vivos[$user]=1
     exp=$(chage -l "$user" 2>/dev/null | awk -F: '/Account expires/{print $2}' | sed 's/^ *//')
     if [[ -z "$exp" || "$exp" == "never" ]]; then
-      dias="Ilimitado"
+      dias="Ilimitado"; c_dias=$C_OK
     else
       d=$(( ( $(date -d "$exp" +%s 2>/dev/null || echo "$hoy") - hoy ) / 86400 ))
       if (( d <= 0 )); then dias="Vencida"; elif (( d == 1 )); then dias="1 dia"; else dias="$d dias"; fi
+      # verde con margen, amarillo si quedan 3 o menos, rojo vencida
+      if (( d <= 0 )); then c_dias=$C_BAD; elif (( d <= 3 )); then c_dias=$C_WARN; else c_dias=$C_OK; fi
     fi
     n=$(ps -u "$user" -o comm= 2>/dev/null | grep -cE 'sshd|dropbear')
+    c_con=$C_OK; [[ "$limite" =~ ^[0-9]+$ ]] && (( n >= limite )) && c_con=$C_BAD
     f="$OUT/$user.txt"
     {
-      [[ -f "$DIR/banner.txt" ]] && cat "$DIR/banner.txt"
-      echo "Usuario: $user"
-      echo "Dias restantes: $dias"
-      echo "Conectados: $n/${limite:--}"
+      if (( color )); then
+        [[ -f "$DIR/banner.txt" ]] && base_color
+        dato "Usuario" "$C_OK" "$user"
+        dato "Dias restantes" "$c_dias" "$dias"
+        dato "Conectados" "$c_con" "$n/${limite:--}"
+      else
+        if [[ -f "$DIR/banner.txt" ]]; then
+          cat "$DIR/banner.txt"
+          # si el banner no termina en salto de linea, que "Usuario:" no quede pegado
+          [[ -n "$(tail -c1 "$DIR/banner.txt")" ]] && echo ""
+        fi
+        echo "Usuario: $user"
+        echo "Dias restantes: $dias"
+        echo "Conectados: $n/${limite:--}"
+      fi
     } > "$f.tmp" && mv -f "$f.tmp" "$f"
     printf 'Match User %s\n    Banner %s\n' "$user" "$f" >> "$match"
   done < "$DB"
@@ -1194,14 +1238,26 @@ UB
 userbanner_mgr(){
   banner "INFO DE CUENTA EN EL BANNER"
   if systemctl is-active --quiet jgx-userbanner 2>/dev/null; then
-    echo -e "Estado actual: ${GREEN}ACTIVADO${NC}\n"
-    read -rp "Desactivar? [s/n]: " r
-    if [[ "$r" =~ ^[sS]$ ]]; then
-      systemctl disable --now jgx-userbanner >/dev/null 2>&1
-      rm -f "$UB_CONF"; rm -rf "$DIR/banners"
-      systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
-      echo -e "\n${GREEN}Desactivado. Se vuelve a mostrar solo el banner comun.${NC}"
-    fi
+    local col_st="${GREEN}ON${NC}"
+    [[ "$(cat "$DIR/banner_color" 2>/dev/null)" == "off" ]] && col_st="${RED}OFF${NC}"
+    echo -e "Estado actual: ${GREEN}ACTIVADO${NC}   Colores: $col_st\n"
+    echo -e "${YELLOW}[1]${NC} Colores ON/OFF ${GRAY}(apagalo si la app muestra '<font ...>' como texto)${NC}"
+    echo -e "${YELLOW}[2]${NC} Desactivar"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " r
+    case $r in
+      1) if [[ "$(cat "$DIR/banner_color" 2>/dev/null)" == "off" ]]; then
+           echo "on" > "$DIR/banner_color"; echo -e "\n${GREEN}Colores activados.${NC}"
+         else
+           echo "off" > "$DIR/banner_color"; echo -e "\n${GREEN}Colores desactivados.${NC}"
+         fi
+         echo -e "${YELLOW}Se aplica en unos 10s; reconectate para verlo.${NC}";;
+      2) systemctl disable --now jgx-userbanner >/dev/null 2>&1
+         rm -f "$UB_CONF"; rm -rf "$DIR/banners"
+         systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
+         echo -e "\n${GREEN}Desactivado. Se vuelve a mostrar solo el banner comun.${NC}";;
+      *) return;;
+    esac
   else
     echo -e "Estado actual: ${RED}DESACTIVADO${NC}\n"
     echo -e "Abajo de tu banner, cada usuario ve al conectar:"
