@@ -876,10 +876,17 @@ EOF
 actualizar(){
   banner; echo -e "${WHITE} ACTUALIZAR PANEL${NC}\n"
   echo -e "${YELLOW}Descargando ultima version...${NC}"
-  if curl -fsSL "$REPO/menu?v=$(date +%s)" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
+  local sha base
+  sha=$(curl -fsSL "https://api.github.com/repos/jtapiaa22/JgXeinz-VPN/commits/main?t=$(date +%s)" 2>/dev/null | grep -oE '[0-9a-f]{40}' | head -1)
+  if [[ -n "$sha" ]]; then
+    base="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/$sha"
+  else
+    base="$REPO"
+  fi
+  if curl -fsSL "$base/menu" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
     mv /usr/bin/menu.new /usr/bin/menu
     chmod +x /usr/bin/menu
-    curl -fsSL "$REPO/proxy.py?v=$(date +%s)" -o "$PROXY" 2>/dev/null
+    curl -fsSL "$base/proxy.py" -o "$PROXY" 2>/dev/null
     echo -e "${GREEN}Panel actualizado. Reiniciando...${NC}"
     sleep 1
     exec /usr/bin/menu
