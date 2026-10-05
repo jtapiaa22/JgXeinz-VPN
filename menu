@@ -1159,6 +1159,91 @@ desinstalar(){
   exit 0
 }
 
+# --------------------------------------------------------------
+#  SPEEDTEST
+# --------------------------------------------------------------
+# usa el CLI oficial de Ookla (se descarga una vez a $DIR/bin); si no se puede,
+# cae a una medicion simple contra Cloudflare con curl.
+ST_BIN="$DIR/bin/speedtest"
+
+speedtest_get(){
+  [[ -x "$ST_BIN" ]] && return 0
+  local arch tmp
+  case "$(uname -m)" in
+    x86_64) arch="x86_64";; aarch64|arm64) arch="aarch64";; armv7l) arch="armhf";; *) return 1;;
+  esac
+  echo -e "${YELLOW}Descargando speedtest (Ookla) por unica vez...${NC}"
+  tmp=$(mktemp -d)
+  if curl -fsSL --max-time 60 "https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-${arch}.tgz" -o "$tmp/st.tgz" \
+     && tar -xzf "$tmp/st.tgz" -C "$tmp" speedtest 2>/dev/null; then
+    mkdir -p "$DIR/bin"; mv -f "$tmp/speedtest" "$ST_BIN"; chmod +x "$ST_BIN"
+  fi
+  rm -rf "$tmp"
+  [[ -x "$ST_BIN" ]]
+}
+
+# Mbps a partir de bytes/seg
+st_mbps(){ awk -v b="$1" 'BEGIN{printf "%.2f", b*8/1000000}'; }
+
+st_fila(){ printf " ${GRAY}%-11s${NC}%b\n" "$1" "$2"; }
+
+speedtest_cloudflare(){
+  echo -e "${YELLOW}Midiendo contra Cloudflare...${NC}\n"
+  local ping down up
+  ping=$(curl -s -o /dev/null --max-time 10 -w '%{time_connect}' https://speed.cloudflare.com/ 2>/dev/null)
+  echo -ne " ${GRAY}bajada...${NC}\r"
+  down=$(curl -s -o /dev/null --max-time 30 -w '%{speed_download}' 'https://speed.cloudflare.com/__down?bytes=100000000' 2>/dev/null)
+  echo -ne " ${GRAY}subida...${NC}\r"
+  up=$(head -c 25000000 /dev/zero | curl -s -o /dev/null --max-time 30 -w '%{speed_upload}' --data-binary @- https://speed.cloudflare.com/__up 2>/dev/null)
+  echo -ne "              \r"
+  [[ -z "$down" || "$down" == 0* && "$up" == 0* ]] && { echo -e "${RED}No se pudo medir (sin salida a internet?)${NC}"; return; }
+  st_fila "Servidor"  "Cloudflare (mas cercano)"
+  st_fila "Ping"      "$(awk -v t="$ping" 'BEGIN{printf "%.0f ms", t*1000}')"
+  st_fila "Bajada"    "${GREEN}$(st_mbps "${down%.*}") Mbps${NC}"
+  st_fila "Subida"    "${GREEN}$(st_mbps "${up%.*}") Mbps${NC}"
+}
+
+speedtest_run(){
+  banner "SPEEDTEST DEL VPS"
+  echo -e "Mide la velocidad del VPS hacia internet (no la de tus clientes)."
+  echo -e "${GRAY}Ojo: en AWS la subida cuenta como trafico saliente (~100-300 MB por test).${NC}\n"
+  if ! speedtest_get; then
+    echo -e "${YELLOW}No se pudo bajar el speedtest de Ookla; uso el test simple.${NC}\n"
+    speedtest_cloudflare; pause; return
+  fi
+  echo -e "${YELLOW}Midiendo... (tarda unos 20-40 segundos)${NC}\n"
+  local json; json=$("$ST_BIN" --accept-license --accept-gdpr -f json 2>/dev/null)
+  if [[ -z "$json" ]]; then
+    echo -e "${YELLOW}Ookla no respondio; uso el test simple.${NC}\n"
+    speedtest_cloudflare; pause; return
+  fi
+  # una linea por dato, en orden fijo
+  local r; mapfile -t r < <(python3 - "$json" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+s = d.get("server", {})
+print("%s - %s" % (s.get("name", "?"), s.get("location", "?")))
+print(d.get("isp", "?"))
+print("%.0f" % d["ping"]["latency"])
+print("%.1f" % d["ping"].get("jitter", 0))
+print(d["download"]["bandwidth"])
+print(d["upload"]["bandwidth"])
+pl = d.get("packetLoss")
+print("-" if pl is None else "%.1f" % pl)
+print(d.get("result", {}).get("url", ""))
+PY
+)
+  [[ ${#r[@]} -lt 7 ]] && { echo -e "${RED}No se pudo leer el resultado${NC}"; pause; return; }
+  st_fila "Servidor"  "${r[0]}"
+  st_fila "Proveedor" "${r[1]}"
+  st_fila "Ping"      "${r[2]} ms ${GRAY}(jitter ${r[3]} ms)${NC}"
+  st_fila "Bajada"    "${GREEN}$(st_mbps "${r[4]}") Mbps${NC}"
+  st_fila "Subida"    "${GREEN}$(st_mbps "${r[5]}") Mbps${NC}"
+  st_fila "Perdida"   "${r[6]}%"
+  [[ -n "${r[7]}" ]] && st_fila "Resultado" "${CYAN}${r[7]}${NC}"
+  pause
+}
+
 herramientas(){
   while true; do
     banner "HERRAMIENTAS"
@@ -1170,7 +1255,8 @@ herramientas(){
     echo -e "${YELLOW}[6]${NC} Zona horaria"
     echo -e "${YELLOW}[7]${NC} Estado de servicios"
     echo -e "${YELLOW}[8]${NC} Info de cuenta en el banner"
-    echo -e "${YELLOW}[9]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[9]${NC} Speedtest del VPS"
+    echo -e "${YELLOW}[10]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -1182,7 +1268,8 @@ herramientas(){
       6) set_zona;;
       7) estado_servicios;;
       8) userbanner_mgr;;
-      9) desinstalar;;
+      9) speedtest_run;;
+      10) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
