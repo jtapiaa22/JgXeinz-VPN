@@ -284,27 +284,28 @@ EOF
 }
 
 badvpn_on(){
+  local p="$1"
   local bin; bin=$(command -v badvpn-udpgw)
-  [[ -z "$bin" ]] && { echo -e "${RED}badvpn-udpgw no esta instalado.${NC}"; echo -e "${YELLOW}Reinstala el panel o compilalo (ver README).${NC}"; return; }
-  cat > /etc/systemd/system/jgx-badvpn.service <<EOF
+  [[ -z "$bin" ]] && { echo -e "${RED}badvpn-udpgw no esta instalado (reinstala el panel o compilalo).${NC}"; return; }
+  # migrar del servicio viejo unico, si existia
+  systemctl disable --now jgx-badvpn >/dev/null 2>&1
+  rm -f /etc/systemd/system/jgx-badvpn.service 2>/dev/null
+  cat > /etc/systemd/system/jgx-badvpn@.service <<EOF
 [Unit]
-Description=JgXeinz BadVPN UDPGW
+Description=JgXeinz BadVPN UDPGW %i
 After=network.target
 [Service]
-ExecStart=$bin --listen-addr 127.0.0.1:$UDPGW_PORT --max-clients 500 --max-connections-for-client 10
+ExecStart=$bin --listen-addr 127.0.0.1:%i --max-clients 500 --max-connections-for-client 10
 Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
-  systemctl enable --now jgx-badvpn >/dev/null 2>&1
+  systemctl enable --now jgx-badvpn@"$p" >/dev/null 2>&1
   sleep 1
-  if pgrep -x badvpn-udpgw >/dev/null; then
-    echo -e "${GREEN}BadVPN activo en 127.0.0.1:$UDPGW_PORT${NC}"
-    echo -e "${YELLOW}Activa UDPGW en HTTP Custom con el puerto $UDPGW_PORT (asi anda la voz/UDP)${NC}"
-  else
-    echo -e "${RED}No se pudo activar BadVPN${NC}"
-  fi
+  systemctl is-active --quiet jgx-badvpn@"$p" \
+    && echo -e "${GREEN}BadVPN activo en 127.0.0.1:$p${NC}" \
+    || echo -e "${RED}No se pudo activar en $p${NC}"
 }
 
 ssh_ports_mgr(){
