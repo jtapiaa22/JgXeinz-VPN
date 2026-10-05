@@ -41,6 +41,69 @@ banner(){
 # --------------------------------------------------------------
 #  GESTION DE USUARIOS
 # --------------------------------------------------------------
+gen_cuenta(){
+  # args: user pass exp limite
+  local user="$1" pass="$2" exp="$3" limite="$4"
+  local ip sshp dropp wsp ovpnp sslp badp dias
+  ip=$(get_ip)
+  local host; host=$(cat "$DIR/domain" 2>/dev/null); [[ -z "$host" ]] && host="$ip"
+  sshp=$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | paste -sd, -)
+  systemctl is-active --quiet dropbear 2>/dev/null && dropp=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
+  wsp=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | paste -sd, -)
+  systemctl is-active --quiet openvpn@server 2>/dev/null && ovpnp=$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')
+  systemctl is-active --quiet stunnel4 2>/dev/null && sslp=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+' | paste -sd, -)
+  pgrep -x badvpn-udpgw >/dev/null && badp="$UDPGW_PORT"
+  if [[ -n "$exp" && "$exp" != "nunca" ]]; then
+    dias=$(( ( $(date -d "$exp" +%s 2>/dev/null) - $(date +%s) ) / 86400 ))
+  fi
+  mkdir -p "$DIR/cuentas"
+  local f="$DIR/cuentas/$user.txt"
+  {
+    echo "=============================================="
+    echo "         CUENTA CREADA EXITOSAMENTE"
+    echo "=============================================="
+    echo " Tipo        : NORMAL"
+    echo " Usuario/ID  : $user"
+    echo " Contrasena  : $pass"
+    echo " Expira      : $exp${dias:+ ($dias dias)}"
+    echo " Limite IP   : ${limite:-1}"
+    echo "----------------------------------------------"
+    echo " Host        : $host"
+    [[ -n "$sshp" ]]  && echo " Puertos SSH : $sshp"
+    [[ -n "$dropp" ]] && echo " Dropbear    : $dropp"
+    [[ -n "$wsp" ]]   && echo " Websocket   : $wsp"
+    [[ -n "$ovpnp" ]] && echo " OpenVPN     : $ovpnp"
+    [[ -n "$sslp" ]]  && echo " SSL Tunnel  : $sslp"
+    [[ -n "$badp" ]]  && echo " BadVPN      : $badp"
+    echo "----------------------------------------------"
+    echo " HTTP CUSTOM :"
+    for p in $(echo "$sshp,$wsp,$sslp" | tr ',' '\n' | grep -v '^$' | sort -un); do
+      echo "   $host:$p@$user:$pass"
+    done
+    if [[ -n "$badp" ]]; then
+      echo "----------------------------------------------"
+      echo " UDP CUSTOM  :"
+      echo "   $host:1-65535@$user:$pass"
+    fi
+    echo "=============================================="
+  } | tee "$f"
+  chmod 600 "$f" 2>/dev/null
+  echo -e "\n${YELLOW}(Guardado; se vuelve a ver con la opcion 16)${NC}"
+}
+
+datos_cuenta(){
+  banner; echo -e "${WHITE} DATOS DE CUENTA${NC}\n"
+  mapfile -t us < <(ls -1 "$DIR/cuentas"/*.txt 2>/dev/null | xargs -n1 basename 2>/dev/null | sed 's/\.txt$//')
+  [[ ${#us[@]} -eq 0 ]] && { echo -e "${RED}No hay cuentas guardadas (se guardan al crear usuarios).${NC}"; pause; return; }
+  local i=1; for u in "${us[@]}"; do echo -e "${YELLOW}[$i]${NC} $u"; ((i++)); done
+  echo ""; read -rp "Numero o nombre: " sel
+  local user
+  if [[ "$sel" =~ ^[0-9]+$ ]]; then user="${us[$((sel-1))]}"; else user="$sel"; fi
+  [[ -z "$user" || ! -f "$DIR/cuentas/$user.txt" ]] && { echo -e "${RED}No encontrado${NC}"; pause; return; }
+  echo ""; cat "$DIR/cuentas/$user.txt"
+  pause
+}
+
 crear_usuario(){
   banner; echo -e "${WHITE} CREAR USUARIO${NC}\n"
   read -rp "Nombre de usuario: " user
@@ -58,14 +121,8 @@ crear_usuario(){
   sed -i "/^$user /d" "$DB"
   echo "$user $limite" >> "$DB"
   echo ""
-  echo -e "${GREEN}Usuario creado con exito${NC}"
-  echo -e "${WHITE}----------------------------------${NC}"
-  echo -e " Usuario : ${GREEN}$user${NC}"
-  echo -e " Clave   : ${GREEN}$pass${NC}"
-  echo -e " Vence   : ${GREEN}$exp${NC}"
-  echo -e " Limite  : ${GREEN}$limite${NC}"
-  echo -e " IP      : ${GREEN}$(get_ip)${NC}"
-  echo -e "${WHITE}----------------------------------${NC}"
+  echo -e "${GREEN}Usuario creado con exito${NC}\n"
+  gen_cuenta "$user" "$pass" "$exp" "$limite"
   pause
 }
 
@@ -511,14 +568,14 @@ modo_conexion(){
   while true; do
     banner
     local st_ssh st_squid st_drop st_ovpn st_ws st_ssl st_sslh st_bad
-    st_ssh="${GREEN}◉${NC}"
-    systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}◉${NC}" || st_squid="${RED}○${NC}"
-    systemctl is-active --quiet dropbear 2>/dev/null && st_drop="${GREEN}◉${NC}" || st_drop="${RED}○${NC}"
-    systemctl is-active --quiet openvpn@server 2>/dev/null && st_ovpn="${GREEN}◉${NC}" || st_ovpn="${RED}○${NC}"
-    [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && st_ws="${GREEN}◉${NC}" || st_ws="${RED}○${NC}"
-    systemctl is-active --quiet stunnel4 2>/dev/null && st_ssl="${GREEN}◉${NC}" || st_ssl="${RED}○${NC}"
-    systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}◉${NC}" || st_sslh="${RED}○${NC}"
-    pgrep -x badvpn-udpgw >/dev/null && st_bad="${GREEN}◉${NC}" || st_bad="${RED}○${NC}"
+    st_ssh="${GREEN}ON${NC}"
+    systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}ON${NC}" || st_squid="${RED}OFF${NC}"
+    systemctl is-active --quiet dropbear 2>/dev/null && st_drop="${GREEN}ON${NC}" || st_drop="${RED}OFF${NC}"
+    systemctl is-active --quiet openvpn@server 2>/dev/null && st_ovpn="${GREEN}ON${NC}" || st_ovpn="${RED}OFF${NC}"
+    [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && st_ws="${GREEN}ON${NC}" || st_ws="${RED}OFF${NC}"
+    systemctl is-active --quiet stunnel4 2>/dev/null && st_ssl="${GREEN}ON${NC}" || st_ssl="${RED}OFF${NC}"
+    systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}ON${NC}" || st_sslh="${RED}OFF${NC}"
+    pgrep -x badvpn-udpgw >/dev/null && st_bad="${GREEN}ON${NC}" || st_bad="${RED}OFF${NC}"
     echo -e "${WHITE} MODO DE CONEXION${NC}"
     echo -e " SSH: ${GREEN}$(grep -i '^port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
     echo -e "${BLUE}-----------------------------------------------${NC}"
@@ -798,10 +855,10 @@ EOF
 actualizar(){
   banner; echo -e "${WHITE} ACTUALIZAR PANEL${NC}\n"
   echo -e "${YELLOW}Descargando ultima version...${NC}"
-  if curl -fsSL "$REPO/menu" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
+  if curl -fsSL "$REPO/menu?v=$(date +%s)" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
     mv /usr/bin/menu.new /usr/bin/menu
     chmod +x /usr/bin/menu
-    curl -fsSL "$REPO/proxy.py" -o "$PROXY" 2>/dev/null
+    curl -fsSL "$REPO/proxy.py?v=$(date +%s)" -o "$PROXY" 2>/dev/null
     echo -e "${GREEN}Panel actualizado. Reiniciando...${NC}"
     sleep 1
     exec /usr/bin/menu
@@ -827,6 +884,7 @@ while true; do
   echo -e "${YELLOW}[06]${NC} Cambiar limite      ${YELLOW}[13]${NC} Actualizar panel"
   echo -e "${YELLOW}[07]${NC} Cambiar contrasena  ${YELLOW}[14]${NC} Limiter $lim_st"
   echo -e "                         ${YELLOW}[15]${NC} Herramientas"
+  echo -e "                         ${YELLOW}[16]${NC} Datos de cuenta"
   echo -e "                         ${YELLOW}[00]${NC} Salir"
   echo -e "${BLUE}-----------------------------------------------${NC}"
   read -rp "Opcion: " opt
@@ -846,6 +904,7 @@ while true; do
     13) actualizar;;
     14) limiter;;
     15) herramientas;;
+    16) datos_cuenta;;
     0|00) clear; exit 0;;
     *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
   esac

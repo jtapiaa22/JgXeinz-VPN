@@ -1,0 +1,11 @@
+# Generador de keys (privado, NO subir)
+gen_key.py
+
+# Backups y temporales
+*.bak
+*.tmp
+menu.new
+
+# Sistema operativo
+.DS_Store
+Thumbs.db
