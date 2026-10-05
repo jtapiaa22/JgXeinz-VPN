@@ -150,13 +150,22 @@ crear_teste(){
 
 remover_usuario(){
   banner; echo -e "${WHITE} REMOVER USUARIO${NC}\n"
-  mapfile -t users < <(awk '{print $1}' "$DB")
+  mapfile -t users < <(awk -F: '$3>=1000 && $1!="nobody" && $1!="ubuntu" {print $1}' /etc/passwd)
   [[ ${#users[@]} -eq 0 ]] && { echo -e "${RED}No hay usuarios${NC}"; pause; return; }
-  local i=1; for u in "${users[@]}"; do echo -e "${YELLOW}[$i]${NC} $u"; ((i++)); done
+  local i=1
+  for u in "${users[@]}"; do
+    if grep -q "^$u " "$DB"; then
+      echo -e "${YELLOW}[$i]${NC} $u"
+    else
+      echo -e "${YELLOW}[$i]${NC} $u ${CYAN}(externo)${NC}"
+    fi
+    ((i++))
+  done
   echo ""; read -rp "Numero o nombre a remover: " sel
   local user
   if [[ "$sel" =~ ^[0-9]+$ ]]; then user="${users[$((sel-1))]}"; else user="$sel"; fi
   [[ -z "$user" ]] && { echo -e "${RED}Seleccion invalida${NC}"; pause; return; }
+  [[ "$user" == "ubuntu" || "$user" == "root" ]] && { echo -e "${RED}Ese usuario no se puede borrar (es del sistema)${NC}"; pause; return; }
   pkill -u "$user" 2>/dev/null
   userdel --force "$user" 2>/dev/null
   sed -i "/^$user /d" "$DB"
@@ -808,6 +817,25 @@ set_dominio(){
     2) rm -f "$DIR/domain"; echo -e "\n${GREEN}Listo, se vuelve a usar la IP${NC}"; pause;;
     0) :;;
   esac
+}
+
+importar_usuarios(){
+  banner; echo -e "${WHITE} IMPORTAR USUARIOS DEL SISTEMA${NC}\n"
+  echo -e "Agrega al panel los usuarios del sistema que no esten en la lista"
+  echo -e "(UID >= 1000, excepto 'ubuntu'), para verlos y gestionarlos.\n"
+  local n=0
+  while IFS=: read -r u _ uid _; do
+    [[ "$uid" =~ ^[0-9]+$ ]] || continue
+    [[ "$uid" -ge 1000 ]] || continue
+    [[ "$u" == "ubuntu" || "$u" == "nobody" ]] && continue
+    if ! grep -q "^$u " "$DB"; then
+      echo "$u 1" >> "$DB"
+      echo -e "${GREEN}Importado: $u${NC}"; n=$((n+1))
+    fi
+  done < /etc/passwd
+  echo -e "\n${GREEN}$n usuario(s) importado(s) (limite por defecto: 1)${NC}"
+  [[ $n -gt 0 ]] && echo -e "${YELLOW}Ajustá su limite/fecha con las opciones 05 y 06 si hace falta.${NC}"
+  pause
 }
 
 desinstalar(){
