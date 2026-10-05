@@ -69,6 +69,13 @@ all_panel_users(){
 # cuenta conexiones activas de un usuario (sshd + dropbear)
 conexiones(){ ps -u "$1" 2>/dev/null | grep -cE 'sshd|dropbear'; }
 
+# quien escucha en un puerto TCP (vacio si esta libre). python3 es el proxy WS del panel.
+quien_usa_puerto(){
+  local p; p=$(ss -tlnp "sport = :$1" 2>/dev/null | grep -oP 'users:\(\("\K[^"]+' | head -1)
+  [[ "$p" == python3 ]] && p="WebSocket del panel (opcion 05)"
+  echo "$p"
+}
+
 # barra de titulo: nombre + version a la izquierda, seccion actual a la derecha.
 # banner "TITULO" -> pantalla de una seccion (deja una linea libre abajo,
 # salvo que se pase un 2do argumento: banner "TITULO" pegado)
@@ -927,6 +934,8 @@ dropbear_mgr(){
       echo ""; read -rp "Opcion: " o
       case $o in
         1) read -rp "Nuevo puerto: " p
+           local ocupa; ocupa=$(quien_usa_puerto "$p")
+           [[ -n "$ocupa" ]] && { echo -e "${RED}El puerto $p ya lo esta usando: ${WHITE}$ocupa${NC}"; pause; continue; }
            [[ "$p" =~ ^[0-9]+$ ]] && { sed -i "s/^DROPBEAR_PORT=.*/DROPBEAR_PORT=$p/" /etc/default/dropbear; systemctl restart dropbear; echo -e "${GREEN}Puerto cambiado a $p. Abrilo en AWS.${NC}"; } || echo -e "${RED}Puerto invalido${NC}"; pause;;
         2) systemctl disable --now dropbear >/dev/null 2>&1; echo -e "${GREEN}Dropbear desactivado${NC}"; pause;;
         0) break;;
@@ -935,6 +944,11 @@ dropbear_mgr(){
       echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
       read -rp "Puerto para Dropbear [ej: 90]: " p
       [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; continue; }
+      local ocupa; ocupa=$(quien_usa_puerto "$p")
+      if [[ -n "$ocupa" ]]; then
+        echo -e "\n${RED}El puerto $p ya lo esta usando: ${WHITE}$ocupa${NC}"
+        echo -e "${YELLOW}Elegi otro puerto o libera ese primero.${NC}"; pause; continue
+      fi
       command -v dropbear >/dev/null 2>&1 || { echo -e "${YELLOW}Instalando dropbear...${NC}"; apt-get install -y dropbear >/dev/null 2>&1; }
       grep -qx "/bin/false" /etc/shells 2>/dev/null || echo "/bin/false" >> /etc/shells
       sed -i 's/^NO_START=1/NO_START=0/' /etc/default/dropbear 2>/dev/null
@@ -947,7 +961,8 @@ dropbear_mgr(){
       systemctl restart dropbear >/dev/null 2>&1
       systemctl is-active --quiet dropbear \
         && echo -e "\n${GREEN}Dropbear activo en el puerto $p. Abrilo en AWS y usalo como otro metodo SSH.${NC}" \
-        || echo -e "\n${RED}No se pudo activar${NC}"
+        || { echo -e "\n${RED}No se pudo activar. Ultimos mensajes de dropbear:${NC}"
+             journalctl -u dropbear -n 6 --no-pager -o cat 2>/dev/null | sed 's/^/  /'; }
       pause
     fi
   done
