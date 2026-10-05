@@ -52,7 +52,7 @@ gen_cuenta(){
   wsp=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | paste -sd, -)
   systemctl is-active --quiet openvpn@server 2>/dev/null && ovpnp=$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')
   systemctl is-active --quiet stunnel4 2>/dev/null && sslp=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+' | paste -sd, -)
-  pgrep -x badvpn-udpgw >/dev/null && badp="$UDPGW_PORT"
+  badp=$(systemctl list-units 'jgx-badvpn@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-badvpn@\K[0-9]+' | paste -sd, -)
   if [[ -n "$exp" && "$exp" != "nunca" ]]; then
     dias=$(( ( $(date -d "$exp" +%s 2>/dev/null) - $(date +%s) ) / 86400 ))
   fi
@@ -344,17 +344,21 @@ ws_mgr(){
 }
 
 badvpn_mgr(){
-  banner; echo -e "${WHITE} BADVPN UDPGW${NC}\n"
-  if pgrep -x badvpn-udpgw >/dev/null; then
-    echo -e "Estado: ${GREEN}ACTIVADO${NC}  (127.0.0.1:$UDPGW_PORT)\n"
-    read -rp "Desactivar? [s/n]: " r
-    [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now jgx-badvpn >/dev/null 2>&1; echo -e "${GREEN}BadVPN desactivado${NC}"; }
-  else
-    echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
-    read -rp "Activar BadVPN (para voz/UDP)? [s/n]: " r
-    [[ "$r" =~ ^[sS]$ ]] && badvpn_on
-  fi
-  pause
+  while true; do
+    banner; echo -e "${WHITE} BADVPN UDPGW (voz/UDP)${NC}\n"
+    local ports; ports=$(systemctl list-units 'jgx-badvpn@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-badvpn@\K[0-9]+' | xargs)
+    echo -e " Puertos activos: ${GREEN}${ports:-ninguno}${NC}"
+    echo -e " ${YELLOW}(corren en 127.0.0.1 y van por el tunel: NO se abren en AWS)${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Agregar puerto"
+    echo -e "${YELLOW}[2]${NC} Quitar puerto"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1) read -rp "Puerto (ej: 7300): " p; [[ "$p" =~ ^[0-9]+$ ]] && badvpn_on "$p" || echo -e "${RED}Puerto invalido${NC}"; pause;;
+      2) read -rp "Puerto a quitar: " p; systemctl disable --now jgx-badvpn@"$p" >/dev/null 2>&1; echo -e "${GREEN}Quitado${NC}"; pause;;
+      0) break;;
+    esac
+  done
 }
 
 squid_mgr(){
@@ -884,10 +888,10 @@ actualizar(){
   else
     base="$REPO"
   fi
-  if curl -fsSL "$base/menu" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
+  if curl -H "Cache-Control: no-cache" -fsSL "$base/menu" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
     mv /usr/bin/menu.new /usr/bin/menu
     chmod +x /usr/bin/menu
-    curl -fsSL "$base/proxy.py" -o "$PROXY" 2>/dev/null
+    curl -H "Cache-Control: no-cache" -fsSL "$base/proxy.py" -o "$PROXY" 2>/dev/null
     echo -e "${GREEN}Panel actualizado. Reiniciando...${NC}"
     sleep 1
     exec /usr/bin/menu
