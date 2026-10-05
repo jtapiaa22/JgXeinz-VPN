@@ -738,33 +738,59 @@ openvpn_mgr(){
   fi
 }
 
+# fila de "modo de conexion": numero, servicio, estado (1/0) y sus puertos
+crow(){
+  local st
+  if [[ "$3" == 1 ]]; then st="${GREEN}ON ${NC}"; else st="${RED}OFF${NC}"; fi
+  printf " ${YELLOW}[%s]${NC} %-19s" "$1" "$2"
+  echo -e "${st}    ${4}"
+}
+
 modo_conexion(){
   while true; do
-    banner "MODO DE CONEXION"
-    local st_ssh st_squid st_drop st_ovpn st_ws st_ssl st_sslh st_bad
-    st_ssh="${GREEN}ON${NC}"
-    systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}ON${NC}" || st_squid="${RED}OFF${NC}"
-    systemctl is-active --quiet dropbear 2>/dev/null && st_drop="${GREEN}ON${NC}" || st_drop="${RED}OFF${NC}"
-    systemctl is-active --quiet openvpn@server 2>/dev/null && st_ovpn="${GREEN}ON${NC}" || st_ovpn="${RED}OFF${NC}"
-    [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && st_ws="${GREEN}ON${NC}" || st_ws="${RED}OFF${NC}"
-    systemctl is-active --quiet stunnel4 2>/dev/null && st_ssl="${GREEN}ON${NC}" || st_ssl="${RED}OFF${NC}"
-    systemctl is-active --quiet sslh 2>/dev/null && st_sslh="${GREEN}ON${NC}" || st_sslh="${RED}OFF${NC}"
-    pgrep -x badvpn-udpgw >/dev/null && st_bad="${GREEN}ON${NC}" || st_bad="${RED}OFF${NC}"
-    echo -e " ${GRAY}Puertos SSH:${NC} ${GREEN}$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | xargs)${NC}"
+    banner "MODO DE CONEXION" pegado
+    local on_squid=0 on_drop=0 on_ovpn=0 on_ws=0 on_ssl=0 on_sslh=0 on_bad=0
+    local p_ssh p_squid p_drop p_ovpn p_ws p_ssl p_sslh p_bad
+    p_ssh=$(grep -iE '^[[:space:]]*port' /etc/ssh/sshd_config 2>/dev/null | awk '{print $2}' | sort -un | paste -sd, - | sed 's/,/, /g')
+    if systemctl is-active --quiet squid 2>/dev/null; then
+      on_squid=1; p_squid=$(grep -oP '^http_port\s+\K[0-9]+' /etc/squid/squid.conf 2>/dev/null | paste -sd, - | sed 's/,/, /g')
+    fi
+    if systemctl is-active --quiet dropbear 2>/dev/null; then
+      on_drop=1; p_drop=$(grep '^DROPBEAR_PORT=' /etc/default/dropbear 2>/dev/null | cut -d= -f2)
+    fi
+    if systemctl is-active --quiet openvpn@server 2>/dev/null; then
+      on_ovpn=1; p_ovpn="$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')${GRAY}/tcp${NC}"
+    fi
+    p_ws=$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | sort -n | paste -sd, - | sed 's/,/, /g')
+    [[ -n "$p_ws" ]] && on_ws=1
+    if systemctl is-active --quiet stunnel4 2>/dev/null; then
+      on_ssl=1; p_ssl=$(grep -i '^accept' /etc/stunnel/stunnel.conf 2>/dev/null | grep -oP '[0-9]+$' | paste -sd, - | sed 's/,/, /g')
+    fi
+    if systemctl is-active --quiet sslh 2>/dev/null; then
+      on_sslh=1; p_sslh=$(grep -oP -- '--listen\s+\S+:\K[0-9]+' /etc/default/sslh 2>/dev/null | head -1)
+    fi
+    p_bad=$(systemctl list-units 'jgx-badvpn@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-badvpn@\K[0-9]+' | sort -n | paste -sd, - | sed 's/,/, /g')
+    pgrep -x badvpn-udpgw >/dev/null && on_bad=1
+    [[ -n "$p_bad" ]] && p_bad="$p_bad ${GRAY}(local)${NC}"
+
+    local ip host; ip=$(get_ip); host=$(cat "$DIR/domain" 2>/dev/null)
+    printf " ${GRAY}%-7s${NC}%s" "IP" "$ip"
+    [[ -n "$host" ]] && echo -e "   ${GRAY}Dominio${NC} ${GREEN}$host${NC}" || echo ""
     hr
-    echo -e "${YELLOW}[01]${NC} OPENSSH             $st_ssh"
-    echo -e "${YELLOW}[02]${NC} SQUID PROXY         $st_squid"
-    echo -e "${YELLOW}[03]${NC} DROPBEAR            $st_drop"
-    echo -e "${YELLOW}[04]${NC} OPENVPN             $st_ovpn"
-    echo -e "${YELLOW}[05]${NC} PROXY SOCKS / WS    $st_ws"
-    echo -e "${YELLOW}[06]${NC} SSL TUNNEL          $st_ssl"
-    echo -e "${YELLOW}[07]${NC} SSLH MULTIPLEX      $st_sslh"
-    echo -e "${YELLOW}[08]${NC} SLOWDNS             ${CYAN}proximamente${NC}"
-    echo -e "${YELLOW}[09]${NC} BADVPN UDPGW        $st_bad"
-    echo -e "${YELLOW}[00]${NC} Volver"
+    printf " ${GRAY}%-24s%-7s%s${NC}\n" "     SERVICIO" "ESTADO" "PUERTOS"
+    crow "01" "OPENSSH"          1          "$p_ssh"
+    crow "02" "SQUID PROXY"      $on_squid  "$p_squid"
+    crow "03" "DROPBEAR"         $on_drop   "$p_drop"
+    crow "04" "OPENVPN"          $on_ovpn   "$p_ovpn"
+    crow "05" "PROXY SOCKS / WS" $on_ws     "$p_ws"
+    crow "06" "SSL TUNNEL"       $on_ssl    "$p_ssl"
+    crow "07" "SSLH MULTIPLEX"   $on_sslh   "$p_sslh"
+    printf " ${YELLOW}[%s]${NC} %-19s" "08" "SLOWDNS"; echo -e "${CYAN}proximamente${NC}"
+    crow "09" "BADVPN UDPGW"     $on_bad    "$p_bad"
+    echo -e " ${YELLOW}[00]${NC} Volver"
     hr
-    echo ""
-    read -rp "Opcion: " op
+    echo -e " ${GRAY}Los puertos publicos hay que abrirlos en AWS; los (local) no.${NC}"
+    read -rp "$(echo -e " ${CYAN}›${NC} Opcion: ")" op
     case $op in
       1|01) ssh_ports_mgr;;
       2|02) squid_mgr;;
