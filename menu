@@ -780,18 +780,39 @@ trafico(){
   done
 }
 
+set_dominio(){
+  banner; echo -e "${WHITE} DOMINIO DEL SERVIDOR${NC}\n"
+  local cur; cur=$(cat "$DIR/domain" 2>/dev/null)
+  echo -e " Actual: ${GREEN}${cur:-(ninguno, se usa la IP)}${NC}\n"
+  echo -e "${YELLOW}[1]${NC} Poner / cambiar dominio"
+  echo -e "${YELLOW}[2]${NC} Quitar dominio (volver a la IP)"
+  echo -e "${YELLOW}[0]${NC} Volver"
+  echo ""; read -rp "Opcion: " o
+  case $o in
+    1) read -rp "Dominio (ej: vps.tudominio.com): " d
+       [[ -z "$d" ]] && { echo -e "${RED}Vacio${NC}"; pause; return; }
+       echo "$d" > "$DIR/domain"
+       echo -e "\n${GREEN}Dominio guardado: $d${NC}"
+       echo -e "${YELLOW}Las cuentas nuevas saldran con el dominio.${NC}"; pause;;
+    2) rm -f "$DIR/domain"; echo -e "\n${GREEN}Listo, se vuelve a usar la IP${NC}"; pause;;
+    0) :;;
+  esac
+}
+
 herramientas(){
   while true; do
     banner; echo -e "${WHITE} HERRAMIENTAS${NC}\n"
     echo -e "${YELLOW}[1]${NC} Optimizar red (BBR)"
     echo -e "${YELLOW}[2]${NC} Banner / mensaje de conexion"
     echo -e "${YELLOW}[3]${NC} Trafico por usuario"
+    echo -e "${YELLOW}[4]${NC} Dominio del servidor"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
       1) optimizar;;
       2) editar_banner;;
       3) trafico;;
+      4) set_dominio;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
