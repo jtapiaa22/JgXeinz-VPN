@@ -390,10 +390,127 @@ EOF
   pause
 }
 
+openvpn_install(){
+  local PORT="$1"
+  echo -e "${YELLOW}Instalando paquetes...${NC}"
+  apt-get update -y >/dev/null 2>&1
+  apt-get install -y openvpn easy-rsa iptables >/dev/null 2>&1
+  local E=/etc/openvpn/easy-rsa
+  rm -rf "$E"
+  make-cadir "$E" >/dev/null 2>&1 || { mkdir -p "$E"; cp -r /usr/share/easy-rsa/* "$E"/ 2>/dev/null; }
+  cd "$E" || { echo -e "${RED}No se encontro easy-rsa${NC}"; return; }
+  echo -e "${YELLOW}Generando certificados (puede tardar 1-2 min)...${NC}"
+  ./easyrsa init-pki >/dev/null 2>&1
+  ./easyrsa --batch build-ca nopass >/dev/null 2>&1
+  ./easyrsa --batch build-server-full server nopass >/dev/null 2>&1
+  ./easyrsa --batch build-client-full jgxeinz nopass >/dev/null 2>&1
+  ./easyrsa gen-dh >/dev/null 2>&1
+  openvpn --genkey secret /etc/openvpn/ta.key >/dev/null 2>&1
+  cp pki/ca.crt pki/issued/server.crt pki/private/server.key pki/dh.pem /etc/openvpn/ 2>/dev/null
+  cat > /etc/openvpn/server.conf <<EOF
+port $PORT
+proto tcp
+dev tun
+ca ca.crt
+cert server.crt
+key server.key
+dh dh.pem
+tls-auth ta.key 0
+topology subnet
+server 10.8.0.0 255.255.255.0
+push "redirect-gateway def1 bypass-dhcp"
+push "dhcp-option DNS 8.8.8.8"
+push "dhcp-option DNS 1.1.1.1"
+keepalive 10 120
+data-ciphers AES-256-GCM:AES-128-GCM
+data-ciphers-fallback AES-256-CBC
+persist-key
+persist-tun
+user nobody
+group nogroup
+status /var/log/openvpn-status.log
+verb 3
+EOF
+  echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-jgx-ovpn.conf
+  sysctl -w net.ipv4.ip_forward=1 >/dev/null 2>&1
+  local nic; nic=$(ip route | awk '/default/{print $5; exit}')
+  iptables -t nat -C POSTROUTING -s 10.8.0.0/24 -o "$nic" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o "$nic" -j MASQUERADE
+  DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent >/dev/null 2>&1
+  netfilter-persistent save >/dev/null 2>&1
+  systemctl enable openvpn@server >/dev/null 2>&1
+  systemctl restart openvpn@server >/dev/null 2>&1
+  sleep 2
+  local ip; ip=$(get_ip)
+  cat > /root/jgxeinz-ovpn.ovpn <<EOF
+client
+dev tun
+proto tcp
+remote $ip $PORT
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+remote-cert-tls server
+data-ciphers AES-256-GCM:AES-128-GCM
+data-ciphers-fallback AES-256-CBC
+auth-nocache
+verb 3
+key-direction 1
+<ca>
+$(cat /etc/openvpn/ca.crt)
+</ca>
+<cert>
+$(cat "$E/pki/issued/jgxeinz.crt")
+</cert>
+<key>
+$(cat "$E/pki/private/jgxeinz.key")
+</key>
+<tls-auth>
+$(cat /etc/openvpn/ta.key)
+</tls-auth>
+EOF
+  if systemctl is-active --quiet openvpn@server; then
+    echo -e "\n${GREEN}OpenVPN activo en el puerto $PORT (tcp). Abrilo en AWS.${NC}"
+    echo -e "${GREEN}Config del cliente: /root/jgxeinz-ovpn.ovpn${NC}"
+  else
+    echo -e "\n${RED}No se pudo iniciar. Revisa: journalctl -u openvpn@server${NC}"
+  fi
+}
+
+openvpn_mgr(){
+  banner; echo -e "${WHITE} OPENVPN${NC}\n"
+  if systemctl is-active --quiet openvpn@server 2>/dev/null; then
+    local op; op=$(grep -i '^port' /etc/openvpn/server.conf 2>/dev/null | awk '{print $2}')
+    echo -e "Estado: ${GREEN}ACTIVADO${NC}   Puerto: ${GREEN}$op (tcp)${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Ver la config del cliente (.ovpn)"
+    echo -e "${YELLOW}[2]${NC} Remover OpenVPN"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1) echo -e "\n${GREEN}Archivo:${NC} /root/jgxeinz-ovpn.ovpn"
+         echo -e "${YELLOW}Pasalo a tu dispositivo y abrilo con la app OpenVPN.${NC}"
+         echo -e "Para verlo en pantalla: ${CYAN}cat /root/jgxeinz-ovpn.ovpn${NC}"; pause;;
+      2) read -rp "Seguro que queres remover OpenVPN? [s/n]: " r
+         [[ "$r" =~ ^[sS]$ ]] && { systemctl disable --now openvpn@server >/dev/null 2>&1; apt-get remove --purge -y openvpn >/dev/null 2>&1; rm -rf /etc/openvpn/easy-rsa /etc/openvpn/server.conf /etc/openvpn/ca.crt /etc/openvpn/server.crt /etc/openvpn/server.key /etc/openvpn/dh.pem /etc/openvpn/ta.key /root/jgxeinz-ovpn.ovpn; echo -e "${GREEN}OpenVPN removido${NC}"; }
+         pause;;
+      0) :;;
+    esac
+  else
+    echo -e "Estado: ${RED}DESACTIVADO${NC}\n"
+    echo -e "Instala un servidor OpenVPN (TCP) y genera el .ovpn del cliente."
+    read -rp "Puerto para OpenVPN [1194]: " p
+    [[ -z "$p" ]] && p=1194
+    [[ ! "$p" =~ ^[0-9]+$ ]] && { echo -e "${RED}Puerto invalido${NC}"; pause; return; }
+    openvpn_install "$p"
+    pause
+  fi
+}
+
 modo_conexion(){
   while true; do
     banner
-    local st_ssh st_squid st_drop st_ws st_ssl st_sslh st_bad
+    local st_ssh st_squid st_drop st_ovpn st_ws st_ssl st_sslh st_bad
     st_ssh="${GREEN}◉${NC}"
     systemctl is-active --quiet squid 2>/dev/null && st_squid="${GREEN}◉${NC}" || st_squid="${RED}○${NC}"
     systemctl is-active --quiet dropbear 2>/dev/null && st_drop="${GREEN}◉${NC}" || st_drop="${RED}○${NC}"
