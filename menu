@@ -1135,10 +1135,10 @@ desinstalar(){
   for u in $(systemctl list-units 'jgx-ws@*' 'jgx-badvpn@*' --all --no-legend 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" 2>/dev/null
   done
-  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear 2>/dev/null
+  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear jgx-reboot.timer 2>/dev/null
   rm -f /etc/systemd/system/jgx-ws@.service /etc/systemd/system/jgx-badvpn@.service \
         /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service \
-        /etc/systemd/system/jgx-userbanner.service /etc/systemd/system/jgx-dropbear.service
+        /etc/systemd/system/jgx-userbanner.service /etc/systemd/system/jgx-dropbear.service         /etc/systemd/system/jgx-reboot.timer /etc/systemd/system/jgx-reboot.service
   systemctl daemon-reload
 
   rm -f /etc/ssh/sshd_config.d/10-jgxeinz-banner.conf
@@ -1244,6 +1244,77 @@ PY
   pause
 }
 
+# --------------------------------------------------------------
+#  REINICIAR VPS
+# --------------------------------------------------------------
+# reinicio desde adentro del sistema: anda en cualquier proveedor.
+# el automatico es un timer de systemd (algunas imagenes minimas no traen cron)
+# y usa la zona horaria del VPS (Herramientas > Zona horaria).
+reiniciar_mgr(){
+  while true; do
+    banner "REINICIAR VPS"
+    local hora; hora=$(grep -oP '^OnCalendar=\*-\*-\* \K[0-9]{2}:[0-9]{2}' /etc/systemd/system/jgx-reboot.timer 2>/dev/null)
+    if systemctl is-active --quiet jgx-reboot.timer 2>/dev/null; then
+      echo -e " Reinicio automatico: ${GREEN}todos los dias a las $hora${NC}"
+    else
+      echo -e " Reinicio automatico: ${RED}OFF${NC}"
+    fi
+    echo -e " ${GRAY}Hora del VPS: $(date +%H:%M) ($(timedatectl show -p Timezone --value 2>/dev/null))${NC}\n"
+    echo -e "${YELLOW}[1]${NC} Reiniciar ahora"
+    echo -e "${YELLOW}[2]${NC} Reinicio automatico diario (activar / cambiar hora)"
+    echo -e "${YELLOW}[3]${NC} Quitar reinicio automatico"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1)
+        echo -e "\n${YELLOW}Se van a cortar todas las conexiones (la tuya tambien).${NC}"
+        echo -e "${YELLOW}El VPS vuelve en 1-2 minutos con los servicios del panel activos.${NC}"
+        read -rp "Reiniciar ahora? [s/n]: " r
+        if [[ "$r" =~ ^[sS]$ ]]; then
+          echo -e "\n${GREEN}Reiniciando... volve a entrar en un par de minutos.${NC}"
+          sync; sleep 1; systemctl reboot
+          exit 0
+        fi;;
+      2)
+        read -rp "Hora del reinicio (HH:MM, ej 05:00) [05:00]: " h
+        [[ -z "$h" ]] && h="05:00"
+        [[ "$h" =~ ^[0-9]{1,2}:[0-9]{2}$ ]] || { echo -e "${RED}Hora invalida${NC}"; pause; continue; }
+        local hh=${h%%:*} mm=${h##*:}
+        (( 10#$hh <= 23 && 10#$mm <= 59 )) || { echo -e "${RED}Hora invalida${NC}"; pause; continue; }
+        h=$(printf '%02d:%02d' "$((10#$hh))" "$((10#$mm))")
+        cat > /etc/systemd/system/jgx-reboot.service <<UNIT
+[Unit]
+Description=JgXeinz reinicio programado
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl reboot
+UNIT
+        cat > /etc/systemd/system/jgx-reboot.timer <<UNIT
+[Unit]
+Description=JgXeinz reinicio diario
+[Timer]
+OnCalendar=*-*-* $h:00
+[Install]
+WantedBy=timers.target
+UNIT
+        systemctl daemon-reload
+        systemctl enable --now jgx-reboot.timer >/dev/null 2>&1
+        systemctl restart jgx-reboot.timer >/dev/null 2>&1
+        systemctl is-active --quiet jgx-reboot.timer \
+          && echo -e "\n${GREEN}Listo: el VPS se reinicia todos los dias a las $h.${NC}" \
+          || echo -e "\n${RED}No se pudo programar${NC}"
+        pause;;
+      3)
+        systemctl disable --now jgx-reboot.timer >/dev/null 2>&1
+        rm -f /etc/systemd/system/jgx-reboot.timer /etc/systemd/system/jgx-reboot.service
+        systemctl daemon-reload
+        echo -e "\n${GREEN}Reinicio automatico quitado${NC}"; pause;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
+  done
+}
+
 herramientas(){
   while true; do
     banner "HERRAMIENTAS"
@@ -1256,7 +1327,8 @@ herramientas(){
     echo -e "${YELLOW}[7]${NC} Estado de servicios"
     echo -e "${YELLOW}[8]${NC} Info de cuenta en el banner"
     echo -e "${YELLOW}[9]${NC} Speedtest del VPS"
-    echo -e "${YELLOW}[10]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[10]${NC} Reiniciar VPS"
+    echo -e "${YELLOW}[11]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -1269,7 +1341,8 @@ herramientas(){
       7) estado_servicios;;
       8) userbanner_mgr;;
       9) speedtest_run;;
-      10) desinstalar;;
+      10) reiniciar_mgr;;
+      11) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
