@@ -2197,6 +2197,9 @@ mrow(){
 # modo no interactivo: lo usa el timer diario de vencimientos de Xray
 [[ "$1" == "--xray-apply" ]] && { xray_apply; exit 0; }
 
+# config de Xray de una version anterior (sin estadisticas): regenerarlo una vez
+[[ -x /usr/local/bin/xray && -f "$XR_CONF" ]] && ! grep -q '"statsUserOnline"' "$XR_CONF" && xray_apply >/dev/null 2>&1
+
 # si el banner por usuario esta activo, su script queda al dia con esta version del panel
 systemctl is-enabled --quiet jgx-userbanner 2>/dev/null && userbanner_write
 
