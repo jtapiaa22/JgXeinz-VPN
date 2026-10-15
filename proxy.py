@@ -3,7 +3,7 @@
 # Recibe el handshake WebSocket del payload y reenvia la conexion al SSH local
 # (127.0.0.1:22). Si el request trae la ruta de Xray (/etc/jgxeinz/xray/path),
 # lo pasa tal cual a Xray (VLESS/WS en 127.0.0.1:10080): mismo puerto para ambos.
-import os, re, socket, threading, select, sys
+import os, re, socket, threading, select, sys, time
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 TARGET = ('127.0.0.1', 22)
@@ -57,6 +57,37 @@ def pipe(a, b):
         b.close()
 
 
+def wait_more(c, buf, rx, limit=2.0):
+    # despues del payload: junta lo que mande el cliente hasta ver el saludo
+    # de SSH o el pedido de Xray (V2Ray manda su WebSocket recien despues del 101)
+    end = time.time() + limit
+    while True:
+        if b'SSH-' in buf:
+            return buf, None
+        m = rx.search(buf)
+        if m:
+            return buf, m
+        left = end - time.time()
+        if left <= 0 or len(buf) > 65536:
+            return buf, None
+        r, _, _ = select.select([c], [], [], left)
+        if not r:
+            return buf, None
+        d = c.recv(65536)
+        if not d:
+            raise ConnectionError('cliente cerro')
+        buf += d
+
+
+def to_xray(c, buf):
+    # le pasamos el request desde la linea con su ruta (descarta requests
+    # "falsos" del payload) y Xray responde su propio 101
+    r = socket.create_connection(XRAY_TARGET)
+    nodelay(r)
+    r.sendall(buf)
+    pipe(c, r)
+
+
 def handle(c):
     try:
         nodelay(c)
@@ -66,20 +97,21 @@ def handle(c):
         rx = xray_re()
         m = rx.search(data) if rx else None
         if m:
-            # Xray: le pasamos el request desde la linea con su ruta (descarta
-            # requests "falsos" del payload) y Xray responde su propio 101
-            r = socket.create_connection(XRAY_TARGET)
-            nodelay(r)
-            r.sendall(data[m.start():])
-            pipe(c, r)
+            to_xray(c, data[m.start():])
             return
+        c.sendall(RESP)
+        rest = data.split(b'\r\n\r\n', 1)[1] if b'\r\n\r\n' in data else b''
+        if rx:
+            # con Xray instalado: ver si lo que sigue al payload es V2Ray o SSH
+            rest, m = wait_more(c, rest, rx)
+            if m:
+                to_xray(c, rest[m.start():])
+                return
         r = socket.create_connection(TARGET)
         nodelay(r)
-        c.sendall(RESP)
-        if b'\r\n\r\n' in data:
-            rest = data.split(b'\r\n\r\n', 1)[1]
-            if rest.startswith(b'SSH-'):
-                r.sendall(rest)
+        i = rest.find(b'SSH-')
+        if i >= 0:
+            r.sendall(rest[i:])
         pipe(c, r)
     except Exception:
         try:
