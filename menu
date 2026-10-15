@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.5"
+VERSION="1.6"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -716,7 +716,7 @@ xray_apply(){
     "settings": { "clients": [ $clients ], "decryption": "none" },
     "streamSettings": {
       "network": "ws",
-      "wsSettings": { "path": "$(xr_path)" },
+      "wsSettings": { "path": "$(xr_path)", "heartbeatPeriod": 30 },
       "sockopt": { "trustedXForwardedFor": ["X-Forwarded-For"] }
     },
     "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
@@ -732,7 +732,8 @@ xray_apply(){
     "domainStrategy": "IPIfNonMatch",
     "rules": [
       { "type": "field", "ip": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10"], "outboundTag": "block" },
-      { "type": "field", "port": "25", "outboundTag": "block" }
+      { "type": "field", "port": "25", "outboundTag": "block" },
+      { "type": "field", "network": "udp", "port": "443", "outboundTag": "block" }
     ]
   }
 }
@@ -2198,7 +2199,7 @@ mrow(){
 [[ "$1" == "--xray-apply" ]] && { xray_apply; exit 0; }
 
 # config de Xray de una version anterior (sin estadisticas): regenerarlo una vez
-[[ -x /usr/local/bin/xray && -f "$XR_CONF" ]] && ! grep -q '"statsUserOnline"' "$XR_CONF" && xray_apply >/dev/null 2>&1
+[[ -x /usr/local/bin/xray && -f "$XR_CONF" ]] && ! grep -q '"heartbeatPeriod"' "$XR_CONF" && xray_apply >/dev/null 2>&1
 
 # si el banner por usuario esta activo, su script queda al dia con esta version del panel
 systemctl is-enabled --quiet jgx-userbanner 2>/dev/null && userbanner_write
