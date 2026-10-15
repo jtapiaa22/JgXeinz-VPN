@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.6"
+VERSION="1.7"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -688,6 +688,7 @@ XR_DIR="$DIR/xray"
 XR_USERS="$XR_DIR/users"     # nombre uuid vencimiento(YYYY-MM-DD)
 XR_CONF="/usr/local/etc/xray/config.json"
 XR_PORT="10080"
+XR_PORT_HU="10081"       # VLESS sobre HTTPUpgrade (misma cuenta, ruta <ruta>-hu)
 XR_API="10085"          # API de estadisticas (solo local)
 XR_INSTALLER="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
@@ -717,6 +718,17 @@ xray_apply(){
     "streamSettings": {
       "network": "ws",
       "wsSettings": { "path": "$(xr_path)", "heartbeatPeriod": 30 },
+      "sockopt": { "trustedXForwardedFor": ["X-Forwarded-For"] }
+    },
+    "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+  }, {
+    "listen": "127.0.0.1",
+    "port": $XR_PORT_HU,
+    "protocol": "vless",
+    "settings": { "clients": [ $clients ], "decryption": "none" },
+    "streamSettings": {
+      "network": "httpupgrade",
+      "httpupgradeSettings": { "path": "$(xr_path)-hu" },
       "sockopt": { "trustedXForwardedFor": ["X-Forwarded-For"] }
     },
     "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
@@ -814,9 +826,11 @@ PY2
 }
 
 xray_link(){
-  local name="$1" uuid="$2" host="$3" port="$4" p
-  p=$(xr_path | sed 's#/#%2F#g')
-  echo "vless://$uuid@$host:$port?encryption=none&security=none&type=ws&host=$host&path=$p#$name"
+  # args: nombre uuid host puerto [ws|httpupgrade]
+  local name="$1" uuid="$2" host="$3" port="$4" t="${5:-ws}" p
+  p=$(xr_path); [[ "$t" == "httpupgrade" ]] && p="$p-hu"
+  p=$(echo "$p" | sed 's#/#%2F#g')
+  echo "vless://$uuid@$host:$port?encryption=none&security=none&type=$t&host=$host&path=$p#$name"
 }
 
 xray_ws_port(){
@@ -832,8 +846,12 @@ xray_show(){
     echo -e "${RED} No hay WebSocket activo: activalo en Modo de conexion -> 05 (ej. puerto 80).${NC}"
     return
   fi
-  [[ -n "$host" ]] && echo -e "\n ${WHITE}Por el dominio:${NC}\n ${GREEN}$(xray_link "$name" "$uuid" "$host" "$wsp")${NC}"
-  echo -e "\n ${WHITE}Por la IP:${NC}\n ${GREEN}$(xray_link "$name" "$uuid" "$ip" "$wsp")${NC}"
+  echo -e "\n ${WHITE}WebSocket${NC} ${GRAY}(ruta $(xr_path))${NC}"
+  [[ -n "$host" ]] && echo -e " Dominio: ${GREEN}$(xray_link "$name" "$uuid" "$host" "$wsp")${NC}"
+  echo -e " IP:      ${GREEN}$(xray_link "$name" "$uuid" "$ip" "$wsp")${NC}"
+  echo -e "\n ${WHITE}HTTPUpgrade${NC} ${GRAY}(mas liviano; ruta $(xr_path)-hu)${NC}"
+  [[ -n "$host" ]] && echo -e " Dominio: ${GREEN}$(xray_link "$name" "$uuid" "$host" "$wsp" httpupgrade)${NC}"
+  echo -e " IP:      ${GREEN}$(xray_link "$name" "$uuid" "$ip" "$wsp" httpupgrade)${NC}"
   echo -e "\n ${GRAY}En HTTP Custom: modo V2Ray, pega el link. Para tu payload/bug host,"
   echo -e " cambia el campo 'host' (Host del WebSocket) por el que uses.${NC}"
 }
@@ -2199,7 +2217,7 @@ mrow(){
 [[ "$1" == "--xray-apply" ]] && { xray_apply; exit 0; }
 
 # config de Xray de una version anterior (sin estadisticas): regenerarlo una vez
-[[ -x /usr/local/bin/xray && -f "$XR_CONF" ]] && ! grep -q '"heartbeatPeriod"' "$XR_CONF" && xray_apply >/dev/null 2>&1
+[[ -x /usr/local/bin/xray && -f "$XR_CONF" ]] && ! grep -q '"httpupgrade"' "$XR_CONF" && xray_apply >/dev/null 2>&1
 
 # si el banner por usuario esta activo, su script queda al dia con esta version del panel
 systemctl is-enabled --quiet jgx-userbanner 2>/dev/null && userbanner_write

@@ -36,7 +36,7 @@ menu
   los usuarios del sistema (root, ubuntu, admin…), que el panel nunca toca.
 - **Monitor online / Limiter:** cuentan sesiones de SSH **y Dropbear**.
 - **Modo de conexión:** puertos SSH (con el 22 siempre protegido), WebSocket (proxy Python),
-  BadVPN/UDPGW, **UDP Custom** (todos los puertos UDP, mismos usuarios del panel), **Xray VLESS sobre WebSocket** (mismo puerto que el WS, link `vless://` para el modo V2Ray de HTTP Custom), Dropbear, OpenVPN, SSL Tunnel (stunnel), SSLH, Squid.
+  BadVPN/UDPGW, **UDP Custom** (todos los puertos UDP, mismos usuarios del panel), **Xray VLESS sobre WebSocket o HTTPUpgrade** (mismo puerto que el WS, link `vless://` para el modo V2Ray de HTTP Custom), Dropbear, OpenVPN, SSL Tunnel (stunnel), SSLH, Squid.
 - **OpenVPN** autentica con los **mismos usuarios y contraseñas del panel** (PAM); el `.ovpn`
   del cliente pide usuario y contraseña, no lleva certificado compartido.
 - **Tráfico por usuario:** la regla se crea al dar de alta y se persiste (sobrevive reinicios).

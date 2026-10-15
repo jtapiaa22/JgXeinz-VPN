@@ -7,7 +7,8 @@ import os, re, socket, threading, select, sys, time
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 TARGET = ('127.0.0.1', 22)
-XRAY_TARGET = ('127.0.0.1', 10080)
+XRAY_TARGET = ('127.0.0.1', 10080)      # VLESS sobre WebSocket   (ruta)
+XRAY_HU_TARGET = ('127.0.0.1', 10081)   # VLESS sobre HTTPUpgrade (ruta + '-hu')
 XRAY_PATH_FILE = '/etc/jgxeinz/xray/path'
 RESP = b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
 
@@ -27,7 +28,8 @@ def xray_re():
         except OSError:
             p = b''
         _xp['mtime'] = mt
-        _xp['re'] = re.compile(rb'^[A-Z]+ ' + re.escape(p) + rb'[ ?]', re.M) if p.startswith(b'/') else None
+        # grupo 1 = '-hu' si es la ruta de HTTPUpgrade
+        _xp['re'] = re.compile(rb'^[A-Z]+ ' + re.escape(p) + rb'(-hu)?[ ?]', re.M) if p.startswith(b'/') else None
     return _xp['re']
 
 
@@ -100,7 +102,9 @@ def to_xray(c, buf, ip=''):
         line, rest = buf.split(b'\r\n', 1)
         rest = re.sub(rb'(?im)^X-Forwarded-For:[^\r\n]*\r\n', b'', rest)
         buf = line + b'\r\nX-Forwarded-For: ' + ip.encode() + b'\r\n' + rest
-    r = socket.create_connection(XRAY_TARGET)
+    m = xray_re().match(buf) if xray_re() else None
+    target = XRAY_HU_TARGET if (m and m.group(1)) else XRAY_TARGET
+    r = socket.create_connection(target)
     nodelay(r)
     r.sendall(buf)
     pipe(c, r)
