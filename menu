@@ -681,7 +681,8 @@ xr_path(){ cat "$XR_DIR/path" 2>/dev/null; }
 # genera el config con las cuentas vigentes y reinicia xray
 xray_apply(){
   [[ -x /usr/local/bin/xray ]] || return 1
-  local hoy clients="" n=0; hoy=$(date +%Y-%m-%d)
+  # locales: si no, pisan las variables de quien llama (xray_mgr) y el link sale vacio
+  local hoy clients="" n=0 name uuid exp; hoy=$(date +%Y-%m-%d)
   touch "$XR_USERS"
   while read -r name uuid exp; do
     [[ -z "$uuid" ]] && continue
