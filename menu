@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.3"
+VERSION="1.4"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -576,7 +576,7 @@ exit 0
 EOF
   chmod 755 "$UDPC_DIR/clean.sh"
   [[ -f "$UDPC_DIR/exclude" ]] || echo "53,5300" > "$UDPC_DIR/exclude"
-  cat > /etc/systemd/system/jgx-udpcustom.service <<EOF
+  cat > /etc/systemd/system/jgx-udpcustom.service /etc/systemd/system/jgx-xray-exp.timer /etc/systemd/system/jgx-xray-exp.service <<EOF
 [Unit]
 Description=JgXeinz UDP Custom
 After=network-online.target
@@ -659,6 +659,212 @@ udpc_mgr(){
         *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
       esac
     fi
+  done
+}
+
+# --------------------------------------------------------------
+#  XRAY (VLESS sobre WebSocket)
+# --------------------------------------------------------------
+# Xray escucha solo en 127.0.0.1:10080. No abre puertos nuevos: el proxy
+# WebSocket del panel (el del puerto 80, etc.) le pasa las conexiones que
+# traen su ruta secreta. Asi va por el mismo puerto, dominio y payload.
+# Las cuentas son UUIDs propios (no los usuarios del panel).
+XR_DIR="$DIR/xray"
+XR_USERS="$XR_DIR/users"     # nombre uuid vencimiento(YYYY-MM-DD)
+XR_CONF="/usr/local/etc/xray/config.json"
+XR_PORT="10080"
+XR_INSTALLER="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
+
+xr_on(){ systemctl is-active --quiet xray 2>/dev/null; }
+xr_path(){ cat "$XR_DIR/path" 2>/dev/null; }
+
+# genera el config con las cuentas vigentes y reinicia xray
+xray_apply(){
+  [[ -x /usr/local/bin/xray ]] || return 1
+  local hoy clients="" n=0; hoy=$(date +%Y-%m-%d)
+  touch "$XR_USERS"
+  while read -r name uuid exp; do
+    [[ -z "$uuid" ]] && continue
+    [[ -n "$exp" && "$exp" < "$hoy" ]] && continue
+    clients+="${clients:+,}{\"id\":\"$uuid\",\"email\":\"$name\"}"; n=$((n+1))
+  done < "$XR_USERS"
+  mkdir -p "$(dirname "$XR_CONF")"
+  cat > "$XR_CONF" <<EOF
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [{
+    "listen": "127.0.0.1",
+    "port": $XR_PORT,
+    "protocol": "vless",
+    "settings": { "clients": [ $clients ], "decryption": "none" },
+    "streamSettings": { "network": "ws", "wsSettings": { "path": "$(xr_path)" } },
+    "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
+  }],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      { "type": "field", "ip": ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "::1/128", "fc00::/7", "fe80::/10"], "outboundTag": "block" },
+      { "type": "field", "port": "25", "outboundTag": "block" }
+    ]
+  }
+}
+EOF
+  chmod 644 "$XR_CONF"
+  if (( n == 0 )); then
+    systemctl stop xray 2>/dev/null
+  else
+    systemctl enable xray >/dev/null 2>&1
+    systemctl restart xray 2>/dev/null
+  fi
+  return 0
+}
+
+xray_link(){
+  local name="$1" uuid="$2" host="$3" port="$4" p
+  p=$(xr_path | sed 's#/#%2F#g')
+  echo "vless://$uuid@$host:$port?encryption=none&security=none&type=ws&host=$host&path=$p#$name"
+}
+
+xray_ws_port(){
+  systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | grep -oP 'jgx-ws@\K[0-9]+' | sort -n | head -1
+}
+
+xray_show(){
+  local name="$1" uuid="$2" exp="$3" ip host wsp
+  ip=$(get_ip); host=$(cat "$DIR/domain" 2>/dev/null); wsp=$(xray_ws_port)
+  echo -e "\n${WHITE}Cuenta V2Ray: ${GREEN}$name${NC}   vence ${GREEN}${exp:-nunca}${NC}"
+  echo -e " UUID: ${CYAN}$uuid${NC}"
+  if [[ -z "$wsp" ]]; then
+    echo -e "${RED} No hay WebSocket activo: activalo en Modo de conexion -> 05 (ej. puerto 80).${NC}"
+    return
+  fi
+  [[ -n "$host" ]] && echo -e "\n ${WHITE}Por el dominio:${NC}\n ${GREEN}$(xray_link "$name" "$uuid" "$host" "$wsp")${NC}"
+  echo -e "\n ${WHITE}Por la IP:${NC}\n ${GREEN}$(xray_link "$name" "$uuid" "$ip" "$wsp")${NC}"
+  echo -e "\n ${GRAY}En HTTP Custom: modo V2Ray, pega el link. Para tu payload/bug host,"
+  echo -e " cambia el campo 'host' (Host del WebSocket) por el que uses.${NC}"
+}
+
+xray_mgr(){
+  while true; do
+    banner "XRAY (VLESS + WEBSOCKET)"
+    if [[ ! -x /usr/local/bin/xray ]]; then
+      echo -e " Estado: ${RED}NO INSTALADO${NC}\n"
+      echo -e " VLESS sobre WebSocket: mismo puerto, dominio y payload que el WS de"
+      echo -e " siempre, pero sin SSH en el medio. Suele andar mas rapido."
+      echo -e " ${GRAY}Se usa con el modo V2Ray de HTTP Custom (link vless://).${NC}\n"
+      echo -e "${YELLOW}[1]${NC} Instalar Xray"
+      echo -e "${YELLOW}[0]${NC} Volver"
+      echo ""; read -rp "Opcion: " o
+      case $o in
+        1)
+          echo -e "\n${YELLOW}Instalando Xray (instalador oficial XTLS)...${NC}"
+          if bash -c "$(curl -fsSL "$XR_INSTALLER")" @ install --without-geodata >/dev/null 2>&1 && [[ -x /usr/local/bin/xray ]]; then
+            mkdir -p "$XR_DIR"; touch "$XR_USERS"
+            [[ -s "$XR_DIR/path" ]] || echo "/jgx$(tr -dc 'a-z0-9' </dev/urandom | head -c 10)" > "$XR_DIR/path"
+            chmod 600 "$XR_DIR/path" "$XR_USERS" 2>/dev/null
+            # el proxy WS (corre como root) lee la ruta; reiniciarlo toma la version nueva
+            for u in $(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | awk '{print $1}'); do systemctl restart "$u"; done
+            # vencimientos: una pasada diaria saca del config las cuentas vencidas
+            cat > /etc/systemd/system/jgx-xray-exp.service <<UNIT
+[Unit]
+Description=JgXeinz Xray - quitar cuentas vencidas
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/menu --xray-apply
+UNIT
+            cat > /etc/systemd/system/jgx-xray-exp.timer <<UNIT
+[Unit]
+Description=JgXeinz Xray - vencimientos diarios
+[Timer]
+OnCalendar=*-*-* 00:05:00
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNIT
+            systemctl daemon-reload
+            systemctl enable --now jgx-xray-exp.timer >/dev/null 2>&1
+            xray_apply
+            echo -e "${GREEN}Xray instalado. Ahora crea una cuenta (opcion 1).${NC}"
+          else
+            echo -e "${RED}No se pudo instalar Xray (sin internet?).${NC}"
+          fi
+          pause;;
+        0) break;;
+        *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+      esac
+      continue
+    fi
+
+    local hoy; hoy=$(date +%Y-%m-%d)
+    if xr_on; then echo -e " Estado: ${GREEN}ACTIVO${NC}"; else echo -e " Estado: ${YELLOW}sin cuentas vigentes${NC}"; fi
+    echo -e " Puerto: ${GREEN}$(xray_ws_port || true)${NC} ${GRAY}(el del WebSocket)${NC}   Ruta: ${GRAY}$(xr_path)${NC}\n"
+    printf " ${WHITE}%-4s %-14s %-12s %s${NC}\n" "#" "CUENTA" "VENCE" "DIAS"
+    mapfile -t xu < <(grep -v '^$' "$XR_USERS" 2>/dev/null)
+    local i=1 l name uuid exp d
+    for l in "${xu[@]}"; do
+      read -r name uuid exp <<< "$l"
+      d=$(( ( $(date -d "$exp" +%s 2>/dev/null || date +%s) - $(date -d "$hoy" +%s) ) / 86400 ))
+      if [[ "$exp" < "$hoy" ]]; then
+        printf " ${YELLOW}[%s]${NC}  %-14s ${RED}%-12s %s${NC}\n" "$i" "$name" "$exp" "vencida"
+      else
+        printf " ${YELLOW}[%s]${NC}  %-14s %-12s %s\n" "$i" "$name" "$exp" "$d"
+      fi
+      i=$((i+1))
+    done
+    [[ ${#xu[@]} -eq 0 ]] && echo -e " ${GRAY}(sin cuentas)${NC}"
+    echo ""
+    echo -e "${YELLOW}[1]${NC} Crear cuenta        ${YELLOW}[4]${NC} Renovar (sumar dias)"
+    echo -e "${YELLOW}[2]${NC} Ver link de cuenta  ${YELLOW}[5]${NC} Ver log"
+    echo -e "${YELLOW}[3]${NC} Quitar cuenta       ${YELLOW}[6]${NC} ${RED}Desinstalar Xray${NC}"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1)
+        read -rp "Nombre de la cuenta: " name
+        valid_user "$name" || { echo -e "${RED}Nombre invalido (minusculas, numeros, - o _)${NC}"; pause; continue; }
+        grep -q "^$name " "$XR_USERS" && { echo -e "${RED}Ya existe${NC}"; pause; continue; }
+        read -rp "Dias de validez [30]: " dias; [[ -z "$dias" ]] && dias=30
+        [[ "$dias" =~ ^[0-9]+$ ]] || { echo -e "${RED}Dias invalidos${NC}"; pause; continue; }
+        uuid=$(cat /proc/sys/kernel/random/uuid); exp=$(date -d "+$dias days" +%Y-%m-%d)
+        echo "$name $uuid $exp" >> "$XR_USERS"
+        xray_apply
+        echo -e "\n${GREEN}Cuenta creada${NC}"; xray_show "$name" "$uuid" "$exp"; pause;;
+      2|3|4)
+        read -rp "Numero de cuenta: " s
+        [[ "$s" =~ ^[0-9]+$ && $s -ge 1 && $s -le ${#xu[@]} ]] || { echo -e "${RED}Invalido${NC}"; pause; continue; }
+        read -r name uuid exp <<< "${xu[$((s-1))]}"
+        if [[ $o == 2 ]]; then
+          xray_show "$name" "$uuid" "$exp"
+        elif [[ $o == 3 ]]; then
+          sed -i "/^$name /d" "$XR_USERS"; xray_apply
+          echo -e "${GREEN}Cuenta $name quitada${NC}"
+        else
+          read -rp "Dias a sumar: " dias
+          [[ "$dias" =~ ^[0-9]+$ ]] || { echo -e "${RED}Dias invalidos${NC}"; pause; continue; }
+          local base="$exp"; [[ "$exp" < "$hoy" ]] && base="$hoy"
+          local nexp; nexp=$(date -d "$base +$dias days" +%Y-%m-%d)
+          sed -i "s/^$name $uuid .*/$name $uuid $nexp/" "$XR_USERS"; xray_apply
+          echo -e "${GREEN}$name vence ahora el $nexp${NC}"
+        fi
+        pause;;
+      5) echo ""; journalctl -u xray -n 30 --no-pager 2>/dev/null; pause;;
+      6)
+        read -rp "Desinstalar Xray y borrar sus cuentas? [s/n]: " r
+        if [[ "$r" =~ ^[sS]$ ]]; then
+          systemctl disable --now jgx-xray-exp.timer >/dev/null 2>&1
+          rm -f /etc/systemd/system/jgx-xray-exp.timer /etc/systemd/system/jgx-xray-exp.service
+          bash -c "$(curl -fsSL "$XR_INSTALLER")" @ remove --purge >/dev/null 2>&1
+          rm -rf "$XR_DIR"; systemctl daemon-reload
+          echo -e "${GREEN}Xray desinstalado${NC}"
+        fi
+        pause;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
   done
 }
 
@@ -927,6 +1133,8 @@ modo_conexion(){
     [[ -n "$p_bad" ]] && p_bad="$p_bad ${GRAY}(local)${NC}"
     local on_udpc=0 p_udpc=""
     udpc_on && { on_udpc=1; p_udpc="1-65535${GRAY}/udp${NC}"; }
+    local on_xr=0 p_xr=""
+    xr_on && { on_xr=1; p_xr="$(xray_ws_port)${GRAY} (via WS)${NC}"; }
 
     local ip host; ip=$(get_ip); host=$(cat "$DIR/domain" 2>/dev/null)
     printf " ${GRAY}%-7s${NC}%s" "IP" "$ip"
@@ -943,6 +1151,7 @@ modo_conexion(){
     printf " ${YELLOW}[%s]${NC} %-19s" "08" "SLOWDNS"; echo -e "${CYAN}proximamente${NC}"
     crow "09" "BADVPN UDPGW"     $on_bad    "$p_bad"
     crow "10" "UDP CUSTOM"       $on_udpc   "$p_udpc"
+    crow "11" "XRAY VLESS (WS)"  $on_xr     "$p_xr"
     echo -e " ${YELLOW}[00]${NC} Volver"
     hr
     echo -e " ${GRAY}Los puertos publicos hay que abrirlos en AWS; los (local) no.${NC}"
@@ -958,6 +1167,7 @@ modo_conexion(){
       8|08) echo -e "\n${CYAN}SlowDNS: lo armamos en una pasada dedicada${NC}"; sleep 2;;
       9|09) badvpn_mgr;;
       10) udpc_mgr;;
+      11) xray_mgr;;
       0|00) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
@@ -1291,7 +1501,7 @@ importar_usuarios(){
 
 estado_servicios(){
   banner "ESTADO DE SERVICIOS"
-  local svcs=(ssh fail2ban squid openvpn@server stunnel4 sslh jgx-dropbear jgx-udpcustom jgx-limiter jgx-userbanner)
+  local svcs=(ssh fail2ban squid openvpn@server stunnel4 sslh jgx-dropbear jgx-udpcustom xray jgx-limiter jgx-userbanner)
   for s in "${svcs[@]}"; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then
       printf " %-18s ${GREEN}%s${NC}\n" "$s" "ACTIVO"
@@ -1334,7 +1544,7 @@ desinstalar(){
   for u in $(systemctl list-units 'jgx-ws@*' 'jgx-badvpn@*' --all --no-legend 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" 2>/dev/null
   done
-  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear jgx-reboot.timer jgx-udpcustom 2>/dev/null
+  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear jgx-reboot.timer jgx-udpcustom jgx-xray-exp.timer xray 2>/dev/null
   "$UDPC_DIR/clean.sh" 2>/dev/null
   rm -f /etc/systemd/system/jgx-ws@.service /etc/systemd/system/jgx-badvpn@.service \
         /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service \
@@ -1858,13 +2068,14 @@ header(){
     local es; es=$(date -d "$ed" +%s 2>/dev/null) || continue
     [[ -n "$es" && "$es" -lt "$now" ]] && exp=$((exp+1))
   done < "$DB"
-  local s_ws=0 s_drop=0 s_ovpn=0 s_ssl=0 s_bad=0 s_squid=0 s_lim=0 s_udpc=0
+  local s_ws=0 s_drop=0 s_ovpn=0 s_ssl=0 s_bad=0 s_squid=0 s_lim=0 s_udpc=0 s_xr=0
   [[ -n "$(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null)" ]] && s_ws=1
   drop_on && s_drop=1
   systemctl is-active --quiet openvpn@server 2>/dev/null && s_ovpn=1
   systemctl is-active --quiet stunnel4 2>/dev/null && s_ssl=1
   pgrep -x badvpn-udpgw >/dev/null && s_bad=1
   udpc_on && s_udpc=1
+  xr_on && s_xr=1
   systemctl is-active --quiet squid 2>/dev/null && s_squid=1
   systemctl is-active --quiet jgx-limiter 2>/dev/null && s_lim=1
 
@@ -1878,7 +2089,7 @@ header(){
   hr
   local exp_col=$GRAY; [[ $exp -gt 0 ]] && exp_col=$RED
   echo -e " ${GRAY}Usuarios${NC} ${WHITE}$users${NC}     ${GRAY}Online${NC} ${GREEN}$online${NC}     ${GRAY}Expirados${NC} ${exp_col}$exp${NC}"
-  echo -e " $(svc SSH 1)$(svc WS $s_ws)$(svc DROP $s_drop)$(svc OVPN $s_ovpn)$(svc SSL $s_ssl)$(svc SQUID $s_squid)$(svc BAD $s_bad)$(svc UDP $s_udpc)$(svc LIM $s_lim)"
+  echo -e " $(svc SSH 1)$(svc WS $s_ws)$(svc DROP $s_drop)$(svc OVPN $s_ovpn)$(svc SSL $s_ssl)$(svc SQUID $s_squid)$(svc BAD $s_bad)$(svc UDP $s_udpc)$(svc XRAY $s_xr)$(svc LIM $s_lim)"
   hr
 }
 
@@ -1892,6 +2103,9 @@ mrow(){
   [[ -n "$nR" ]] && echo -ne "${YELLOW}[$nR]${NC} ${lR}"
   echo ""
 }
+
+# modo no interactivo: lo usa el timer diario de vencimientos de Xray
+[[ "$1" == "--xray-apply" ]] && { xray_apply; exit 0; }
 
 # si el banner por usuario esta activo, su script queda al dia con esta version del panel
 systemctl is-enabled --quiet jgx-userbanner 2>/dev/null && userbanner_write

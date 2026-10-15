@@ -1,11 +1,42 @@
 #!/usr/bin/env python3
 # JgXeinz VPN - proxy WebSocket (Python 3)
-# Recibe el handshake WebSocket del payload y reenvia la conexion al SSH local (127.0.0.1:22)
-import socket, threading, select, sys
+# Recibe el handshake WebSocket del payload y reenvia la conexion al SSH local
+# (127.0.0.1:22). Si el request trae la ruta de Xray (/etc/jgxeinz/xray/path),
+# lo pasa tal cual a Xray (VLESS/WS en 127.0.0.1:10080): mismo puerto para ambos.
+import os, re, socket, threading, select, sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 80
 TARGET = ('127.0.0.1', 22)
+XRAY_TARGET = ('127.0.0.1', 10080)
+XRAY_PATH_FILE = '/etc/jgxeinz/xray/path'
 RESP = b'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n'
+
+_xp = {'mtime': None, 're': None}
+
+
+def xray_re():
+    # ruta de Xray, releida solo si el archivo cambio
+    try:
+        mt = os.stat(XRAY_PATH_FILE).st_mtime
+    except OSError:
+        _xp['mtime'], _xp['re'] = None, None
+        return None
+    if mt != _xp['mtime']:
+        try:
+            p = open(XRAY_PATH_FILE, 'rb').read().strip()
+        except OSError:
+            p = b''
+        _xp['mtime'] = mt
+        _xp['re'] = re.compile(rb'^[A-Z]+ ' + re.escape(p) + rb'[ ?]', re.M) if p.startswith(b'/') else None
+    return _xp['re']
+
+
+def nodelay(s):
+    # manda los paquetes chicos al toque (sin esperar a juntar): baja el ping en juegos
+    try:
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
 
 
 def pipe(a, b):
@@ -26,20 +57,22 @@ def pipe(a, b):
         b.close()
 
 
-def nodelay(s):
-    # manda los paquetes chicos al toque (sin esperar a juntar): baja el ping en juegos
-    try:
-        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-    except Exception:
-        pass
-
-
 def handle(c):
     try:
         nodelay(c)
         c.settimeout(10)
         data = c.recv(65536)
         c.settimeout(None)
+        rx = xray_re()
+        m = rx.search(data) if rx else None
+        if m:
+            # Xray: le pasamos el request desde la linea con su ruta (descarta
+            # requests "falsos" del payload) y Xray responde su propio 101
+            r = socket.create_connection(XRAY_TARGET)
+            nodelay(r)
+            r.sendall(data[m.start():])
+            pipe(c, r)
+            return
         r = socket.create_connection(TARGET)
         nodelay(r)
         c.sendall(RESP)
