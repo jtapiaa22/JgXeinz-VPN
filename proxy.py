@@ -79,9 +79,27 @@ def wait_more(c, buf, rx, limit=2.0):
         buf += d
 
 
-def to_xray(c, buf):
+def client_ip(c, first):
+    # IP real del cliente: la que manda Cloudflare (CF-Connecting-IP) en el
+    # primer pedido; si no hay, la del socket
+    m = re.search(rb'^CF-Connecting-IP:[ \t]*([0-9a-fA-F:.]+)', first, re.M | re.I)
+    if m:
+        return m.group(1).decode()
+    try:
+        return c.getpeername()[0]
+    except Exception:
+        return ''
+
+
+def to_xray(c, buf, ip=''):
     # le pasamos el request desde la linea con su ruta (descarta requests
-    # "falsos" del payload) y Xray responde su propio 101
+    # "falsos" del payload) y Xray responde su propio 101. Le agregamos la IP
+    # real en X-Forwarded-For: sin eso Xray ve 127.0.0.1 y no cuenta al
+    # usuario como conectado en el monitor.
+    if ip and b'\r\n' in buf:
+        line, rest = buf.split(b'\r\n', 1)
+        rest = re.sub(rb'(?im)^X-Forwarded-For:[^\r\n]*\r\n', b'', rest)
+        buf = line + b'\r\nX-Forwarded-For: ' + ip.encode() + b'\r\n' + rest
     r = socket.create_connection(XRAY_TARGET)
     nodelay(r)
     r.sendall(buf)
@@ -96,8 +114,9 @@ def handle(c):
         c.settimeout(None)
         rx = xray_re()
         m = rx.search(data) if rx else None
+        ip = client_ip(c, data)
         if m:
-            to_xray(c, data[m.start():])
+            to_xray(c, data[m.start():], ip)
             return
         c.sendall(RESP)
         rest = data.split(b'\r\n\r\n', 1)[1] if b'\r\n\r\n' in data else b''
@@ -105,7 +124,7 @@ def handle(c):
             # con Xray instalado: ver si lo que sigue al payload es V2Ray o SSH
             rest, m = wait_more(c, rest, rx)
             if m:
-                to_xray(c, rest[m.start():])
+                to_xray(c, rest[m.start():], ip)
                 return
         r = socket.create_connection(TARGET)
         nodelay(r)

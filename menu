@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.4"
+VERSION="1.5"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -289,6 +289,21 @@ monitor_online(){
         printf " %-15s ${RED}%-9s${NC} %-7s %-8s%b\n" "$user" "offline" "0/$limite" "${mb}MB" "$tag"
       fi
     done < <(all_panel_users)
+    if xr_on && [[ -s "$XR_USERS" ]]; then
+      hr
+      printf "${WHITE} %-15s %-9s %-7s %-8s${NC}\n" "V2RAY" "ESTADO" "IPs" "DATOS"
+      local xn xo xmb xv
+      while read -r xn xo xmb xv; do
+        if [[ "$xv" == 1 ]]; then
+          printf " %-15s ${RED}%-9s${NC} %-7s %-8s\n" "$xn" "vencida" "-" "${xmb}MB"
+        elif [[ "$xo" -gt 0 ]]; then
+          printf " ${GREEN}%-15s %-9s %-7s %-8s${NC}\n" "$xn" "ONLINE" "$xo" "${xmb}MB"
+          on=$((on+1))
+        else
+          printf " %-15s ${RED}%-9s${NC} %-7s %-8s\n" "$xn" "offline" "0" "${xmb}MB"
+        fi
+      done < <(xr_monitor_rows)
+    fi
     hr
     echo -e " ${WHITE}Online: ${GREEN}$on${NC}   ${YELLOW}(se actualiza cada 3s - apreta 'q' para salir)${NC}"
     read -t 3 -n 1 -s k
@@ -673,6 +688,7 @@ XR_DIR="$DIR/xray"
 XR_USERS="$XR_DIR/users"     # nombre uuid vencimiento(YYYY-MM-DD)
 XR_CONF="/usr/local/etc/xray/config.json"
 XR_PORT="10080"
+XR_API="10085"          # API de estadisticas (solo local)
 XR_INSTALLER="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
 
 xr_on(){ systemctl is-active --quiet xray 2>/dev/null; }
@@ -698,9 +714,16 @@ xray_apply(){
     "port": $XR_PORT,
     "protocol": "vless",
     "settings": { "clients": [ $clients ], "decryption": "none" },
-    "streamSettings": { "network": "ws", "wsSettings": { "path": "$(xr_path)" } },
+    "streamSettings": {
+      "network": "ws",
+      "wsSettings": { "path": "$(xr_path)" },
+      "sockopt": { "trustedXForwardedFor": ["X-Forwarded-For"] }
+    },
     "sniffing": { "enabled": true, "destOverride": ["http", "tls"] }
   }],
+  "stats": {},
+  "api": { "tag": "api", "listen": "127.0.0.1:$XR_API", "services": ["StatsService"] },
+  "policy": { "levels": { "0": { "statsUserUplink": true, "statsUserDownlink": true, "statsUserOnline": true } } },
   "outbounds": [
     { "protocol": "freedom", "tag": "direct" },
     { "protocol": "blackhole", "tag": "block" }
@@ -715,6 +738,7 @@ xray_apply(){
 }
 EOF
   chmod 644 "$XR_CONF"
+  xr_traffic_save
   if (( n == 0 )); then
     systemctl stop xray 2>/dev/null
   else
@@ -722,6 +746,70 @@ EOF
     systemctl restart xray 2>/dev/null
   fi
   return 0
+}
+
+# suma los contadores actuales de Xray al acumulado ($XR_DIR/traffic) y los
+# pone en 0; se llama antes de cada reinicio de xray para no perder el consumo
+xr_traffic_save(){
+  xr_on || return 0
+  local js; js=$(/usr/local/bin/xray api statsquery --server=127.0.0.1:$XR_API -pattern 'user>>>' -reset 2>/dev/null) || return 0
+  python3 - "$XR_DIR/traffic" "$js" <<'PY2'
+import json, sys
+path, js = sys.argv[1], sys.argv[2]
+tot = {}
+try:
+    for l in open(path):
+        p = l.split()
+        if len(p) == 3: tot[p[0]] = [int(p[1]), int(p[2])]
+except OSError:
+    pass
+try:
+    stats = json.loads(js).get('stat', [])
+except ValueError:
+    stats = []
+for s in stats:
+    n = s.get('name', '').split('>>>')
+    if len(n) == 4 and n[2] == 'traffic':
+        t = tot.setdefault(n[1], [0, 0])
+        t[0 if n[3] == 'uplink' else 1] += int(s.get('value', 0))
+with open(path, 'w') as f:
+    for k, (u, d) in tot.items():
+        f.write(f"{k} {u} {d}\n")
+PY2
+}
+
+# filas para el monitor: "nombre ips_online MB_total vencida(0/1)"
+xr_monitor_rows(){
+  python3 - "$XR_USERS" "$XR_DIR/traffic" "$XR_API" "$(date +%Y-%m-%d)" <<'PY2'
+import json, subprocess, sys
+users, tpath, api, hoy = sys.argv[1:5]
+srv = '--server=127.0.0.1:' + api
+def q(*a):
+    try:
+        return json.loads(subprocess.run(['/usr/local/bin/xray', 'api', *a, srv],
+                          capture_output=True, text=True, timeout=3).stdout or '{}')
+    except Exception:
+        return {}
+tot = {}
+try:
+    for l in open(tpath):
+        p = l.split()
+        if len(p) == 3: tot[p[0]] = int(p[1]) + int(p[2])
+except OSError:
+    pass
+for s in q('statsquery', '-pattern', 'user>>>').get('stat', []):
+    n = s.get('name', '').split('>>>')
+    if len(n) == 4 and n[2] == 'traffic':
+        tot[n[1]] = tot.get(n[1], 0) + int(s.get('value', 0))
+try:
+    rows = [l.split() for l in open(users) if l.strip()]
+except OSError:
+    rows = []
+for r in rows:
+    name, exp = r[0], (r[2] if len(r) > 2 else '')
+    on = int(q('statsonline', '-email', name).get('stat', {}).get('value', 0))
+    print(name, on, tot.get(name, 0) // 1048576, 1 if exp and exp < hoy else 0)
+PY2
 }
 
 xray_link(){
@@ -842,6 +930,7 @@ UNIT
           xray_show "$name" "$uuid" "$exp"
         elif [[ $o == 3 ]]; then
           sed -i "/^$name /d" "$XR_USERS"; xray_apply
+          sed -i "/^$name /d" "$XR_DIR/traffic" 2>/dev/null
           echo -e "${GREEN}Cuenta $name quitada${NC}"
         else
           read -rp "Dias a sumar: " dias
