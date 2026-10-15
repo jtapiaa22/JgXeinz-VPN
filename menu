@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.1"
+VERSION="1.2"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -888,13 +888,62 @@ net.core.rmem_max=16777216
 net.core.wmem_max=16777216
 net.ipv4.tcp_rmem=4096 87380 16777216
 net.ipv4.tcp_wmem=4096 65536 16777216
+# menos cola en los sockets: el ping no se dispara cuando algo descarga
+net.ipv4.tcp_notsent_lowat=16384
+# no volver a arrancar lento despues de un rato sin trafico
+net.ipv4.tcp_slow_start_after_idle=0
+# detecta MTU chico (pasa mucho en 4G) y evita conexiones colgadas
+net.ipv4.tcp_mtu_probing=1
 EOF
   sysctl --system >/dev/null 2>&1
   local cc; cc=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
   echo -e "${GREEN}Optimizacion aplicada.${NC}"
   echo -e " Control de congestion: ${GREEN}$cc${NC}"
   [[ "$cc" == "bbr" ]] && echo -e " ${GREEN}BBR activo${NC}" || echo -e " ${YELLOW}BBR no se activo (kernel sin soporte)${NC}"
+  echo -e " Anti-lag con carga (notsent_lowat): ${GREEN}$(sysctl -n net.ipv4.tcp_notsent_lowat 2>/dev/null)${NC}"
+  echo -e " MTU probing (redes 4G): ${GREEN}$(sysctl -n net.ipv4.tcp_mtu_probing 2>/dev/null)${NC}"
   pause
+}
+
+swap_mgr(){
+  banner "SWAP (memoria extra en disco)"
+  local cur; cur=$(swapon --show=NAME,SIZE --noheadings 2>/dev/null)
+  if [[ -n "$cur" ]]; then
+    echo -e " Swap actual:\n${GREEN}$cur${NC}\n"
+  else
+    echo -e " Swap actual: ${RED}ninguno${NC}\n"
+  fi
+  echo -e " RAM: ${GREEN}$(free -h | awk '/Mem/{print $2}')${NC}   Disco libre: ${GREEN}$(df -h / | awk 'NR==2{print $4}')${NC}\n"
+  echo -e "${YELLOW}[1]${NC} Crear / cambiar swap"
+  echo -e "${YELLOW}[2]${NC} Quitar swap del panel"
+  echo -e "${YELLOW}[0]${NC} Volver"
+  echo ""; read -rp "Opcion: " o
+  case $o in
+    1)
+      read -rp "Tamano en GB [2]: " gb
+      [[ -z "$gb" ]] && gb=2
+      [[ "$gb" =~ ^[1-8]$ ]] || { echo -e "${RED}Pone un numero de 1 a 8${NC}"; pause; return; }
+      local libre; libre=$(df -BG / | awk 'NR==2{gsub("G","",$4); print $4}')
+      (( libre > gb + 2 )) || { echo -e "${RED}No hay disco suficiente (libre: ${libre}G)${NC}"; pause; return; }
+      echo -e "\n${YELLOW}Creando swap de ${gb}G...${NC}"
+      swapoff /swapfile-jgx 2>/dev/null; rm -f /swapfile-jgx
+      fallocate -l "${gb}G" /swapfile-jgx 2>/dev/null || dd if=/dev/zero of=/swapfile-jgx bs=1M count=$((gb*1024)) status=none
+      chmod 600 /swapfile-jgx
+      mkswap /swapfile-jgx >/dev/null 2>&1 && swapon /swapfile-jgx 2>/dev/null
+      grep -q '^/swapfile-jgx ' /etc/fstab || echo '/swapfile-jgx none swap sw 0 0' >> /etc/fstab
+      # usar swap solo cuando haga falta (no pasar todo al disco)
+      echo 'vm.swappiness=10' > /etc/sysctl.d/98-jgx-swap.conf
+      sysctl -w vm.swappiness=10 >/dev/null 2>&1
+      swapon --show=NAME --noheadings 2>/dev/null | grep -q swapfile-jgx \
+        && echo -e "${GREEN}Swap de ${gb}G activo (sobrevive reinicios)${NC}" \
+        || echo -e "${RED}No se pudo activar el swap${NC}"
+      pause;;
+    2)
+      swapoff /swapfile-jgx 2>/dev/null; rm -f /swapfile-jgx /etc/sysctl.d/98-jgx-swap.conf
+      sed -i '\|^/swapfile-jgx |d' /etc/fstab
+      echo -e "\n${GREEN}Swap del panel quitado${NC}"; pause;;
+    0) :;;
+  esac
 }
 
 editar_banner(){
@@ -1328,7 +1377,8 @@ herramientas(){
     echo -e "${YELLOW}[8]${NC} Info de cuenta en el banner"
     echo -e "${YELLOW}[9]${NC} Speedtest del VPS"
     echo -e "${YELLOW}[10]${NC} Reiniciar VPS"
-    echo -e "${YELLOW}[11]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[11]${NC} Swap (memoria extra)"
+    echo -e "${YELLOW}[12]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -1342,7 +1392,8 @@ herramientas(){
       8) userbanner_mgr;;
       9) speedtest_run;;
       10) reiniciar_mgr;;
-      11) desinstalar;;
+      11) swap_mgr;;
+      12) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
@@ -1591,7 +1642,19 @@ actualizar(){
   if curl -H "Cache-Control: no-cache" -fsSL "$base/menu" -o /usr/bin/menu.new && [ -s /usr/bin/menu.new ]; then
     mv /usr/bin/menu.new /usr/bin/menu
     chmod +x /usr/bin/menu
-    curl -H "Cache-Control: no-cache" -fsSL "$base/proxy.py" -o "$PROXY" 2>/dev/null
+    local old_sum; old_sum=$(md5sum "$PROXY" 2>/dev/null | awk '{print $1}')
+    if curl -H "Cache-Control: no-cache" -fsSL "$base/proxy.py" -o "$PROXY.new" 2>/dev/null && [ -s "$PROXY.new" ]; then
+      mv "$PROXY.new" "$PROXY"
+      # si cambio el proxy, reiniciar los WebSocket para que tomen la version nueva
+      if [[ "$(md5sum "$PROXY" | awk '{print $1}')" != "$old_sum" ]]; then
+        for u in $(systemctl list-units 'jgx-ws@*' --state=active --no-legend 2>/dev/null | awk '{print $1}'); do
+          systemctl restart "$u" 2>/dev/null
+        done
+        echo -e "${YELLOW}Proxy WebSocket actualizado (las conexiones WS se reconectan solas).${NC}"
+      fi
+    else
+      rm -f "$PROXY.new"
+    fi
     echo -e "${GREEN}Panel actualizado. Reiniciando...${NC}"
     sleep 1
     exec /usr/bin/menu

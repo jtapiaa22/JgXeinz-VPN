@@ -26,12 +26,22 @@ def pipe(a, b):
         b.close()
 
 
+def nodelay(s):
+    # manda los paquetes chicos al toque (sin esperar a juntar): baja el ping en juegos
+    try:
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except Exception:
+        pass
+
+
 def handle(c):
     try:
+        nodelay(c)
         c.settimeout(10)
         data = c.recv(65536)
         c.settimeout(None)
         r = socket.create_connection(TARGET)
+        nodelay(r)
         c.sendall(RESP)
         if b'\r\n\r\n' in data:
             rest = data.split(b'\r\n\r\n', 1)[1]
