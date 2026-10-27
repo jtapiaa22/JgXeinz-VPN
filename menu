@@ -1892,7 +1892,7 @@ agh_install(){
     if ! echo "$AGH_SHA  $AGH_DIR/agh.tgz" | sha256sum -c --status; then
       rm -f "$AGH_DIR/agh.tgz"; echo -e "${RED}El binario no coincide (sha256). Cancelado.${NC}"; return 1
     fi
-    tar -xzf "$AGH_DIR/agh.tgz" -C "$AGH_DIR" --strip-components=1 AdGuardHome/AdGuardHome
+    tar -xzf "$AGH_DIR/agh.tgz" -C "$AGH_DIR" --strip-components=1 && chmod 755 "$AGH_BIN"
     rm -f "$AGH_DIR/agh.tgz"; chmod 755 "$AGH_BIN"
   fi
   cat > /etc/systemd/system/jgx-adguard.service <<EOF
