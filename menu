@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.8"
+VERSION="1.9"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -1886,14 +1886,23 @@ agh_install(){
   command -v htpasswd >/dev/null || apt-get install -y -qq apache2-utils >/dev/null 2>&1
   id -u "$AGH_USR" >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d "$AGH_DIR" "$AGH_USR" 2>/dev/null
   mkdir -p "$AGH_DIR"
-  if [[ ! -x "$AGH_BIN" ]]; then
+  if [[ ! -f "$AGH_BIN" ]]; then
+    # si quedo una carpeta 'AdGuardHome' de un intento anterior, la limpiamos
+    [[ -d "$AGH_BIN" ]] && rm -rf "$AGH_BIN"
     echo -e "${YELLOW}Descargando AdGuard Home $AGH_VER...${NC}"
     curl -fsSL "$AGH_URL" -o "$AGH_DIR/agh.tgz" || { echo -e "${RED}No se pudo descargar${NC}"; return 1; }
     if ! echo "$AGH_SHA  $AGH_DIR/agh.tgz" | sha256sum -c --status; then
       rm -f "$AGH_DIR/agh.tgz"; echo -e "${RED}El binario no coincide (sha256). Cancelado.${NC}"; return 1
     fi
-    tar -xzf "$AGH_DIR/agh.tgz" -C "$AGH_DIR" --strip-components=1 && chmod 755 "$AGH_BIN"
-    rm -f "$AGH_DIR/agh.tgz"; chmod 755 "$AGH_BIN"
+    # el .tar.gz guarda todo bajo ./AdGuardHome/ ; extraemos y dejamos el binario en su sitio
+    tar -xzf "$AGH_DIR/agh.tgz" -C "$AGH_DIR" 2>/dev/null
+    src=$(find "$AGH_DIR" -type f -name AdGuardHome 2>/dev/null | head -1)
+    if [[ -n "$src" && "$src" != "$AGH_BIN" ]]; then
+      mv -f "$src" "$AGH_DIR/.aghbin" && rm -rf "$AGH_DIR/AdGuardHome" && mv -f "$AGH_DIR/.aghbin" "$AGH_BIN"
+    fi
+    rm -f "$AGH_DIR/agh.tgz"
+    chmod 755 "$AGH_BIN" 2>/dev/null
+    [[ -f "$AGH_BIN" && -x "$AGH_BIN" ]] || { echo -e "${RED}No se pudo extraer el binario${NC}"; return 1; }
   fi
   cat > /etc/systemd/system/jgx-adguard.service <<EOF
 [Unit]
