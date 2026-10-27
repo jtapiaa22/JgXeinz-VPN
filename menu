@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.9"
+VERSION="2.0"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -1923,24 +1923,43 @@ EOF
   return 0
 }
 
-# primer arranque: configura por la API (usuario/clave, DNS en 5353) y escribe el yaml
+# primer arranque: configura por la API (usuario/clave, DNS en 5353) y escribe el yaml.
+# AdGuard exige correr como root en su PRIMER arranque (chequeo de permisos), asi
+# que lo configuramos como root y recien despues lo levantamos como usuario propio.
 agh_setup(){
   local pass="$1"
-  systemctl enable --now jgx-adguard >/dev/null 2>&1
-  local i ok=""
+  systemctl stop jgx-adguard 2>/dev/null
+  # si ya quedo configurado de antes, arranca directo como usuario sin privilegios
+  if [[ -f "$AGH_YAML" ]] && grep -q 'schema_version' "$AGH_YAML"; then
+    chown -R "$AGH_USR":"$AGH_USR" "$AGH_DIR" 2>/dev/null
+    systemctl enable --now jgx-adguard >/dev/null 2>&1; sleep 2
+    agh_on && return 0
+    echo -e "${RED}AdGuard no arranco (opcion 4)${NC}"; return 1
+  fi
+  # primer arranque COMO ROOT, en segundo plano, solo para configurarlo por la API
+  "$AGH_BIN" --no-check-update -c "$AGH_YAML" -w "$AGH_DIR" -h 127.0.0.1 -p "$AGH_WEB" >/dev/null 2>&1 &
+  local pid=$! i ok=""
   for i in $(seq 1 20); do
     curl -s -m 3 "http://127.0.0.1:$AGH_WEB/control/install/get_addresses" >/dev/null 2>&1 && { ok=1; break; }
     sleep 1
   done
-  [[ -z "$ok" ]] && { echo -e "${RED}AdGuard no respondio al arrancar${NC}"; return 1; }
-  # ya configurado de antes?
-  if [[ -f "$AGH_YAML" ]] && grep -q 'schema_version' "$AGH_YAML"; then return 0; fi
+  if [[ -z "$ok" ]]; then
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+    echo -e "${RED}AdGuard no respondio al arrancar${NC}"; return 1
+  fi
   local body
   body=$(printf '{"web":{"ip":"127.0.0.1","port":%s},"dns":{"ip":"127.0.0.1","port":%s},"username":"admin","password":"%s"}' "$AGH_WEB" "$AGH_DNS" "$pass")
   curl -s -m 10 -X POST "http://127.0.0.1:$AGH_WEB/control/install/configure" -H 'Content-Type: application/json' -d "$body" >/dev/null 2>&1
   sleep 2
-  echo "admin:$pass" > "$AGH_DIR/cred"; chmod 600 "$AGH_DIR/cred"; chown "$AGH_USR" "$AGH_DIR/cred" 2>/dev/null
-  [[ -f "$AGH_YAML" ]] && grep -q 'schema_version' "$AGH_YAML"
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  echo "admin:$pass" > "$AGH_DIR/cred"; chmod 600 "$AGH_DIR/cred"
+  chown -R "$AGH_USR":"$AGH_USR" "$AGH_DIR" 2>/dev/null
+  if [[ ! -f "$AGH_YAML" ]] || ! grep -q 'schema_version' "$AGH_YAML"; then
+    echo -e "${RED}No se pudo configurar${NC}"; return 1
+  fi
+  # ahora si, servicio definitivo como usuario sin privilegios
+  systemctl enable --now jgx-adguard >/dev/null 2>&1; sleep 2
+  agh_on
 }
 
 agh_setpass(){
