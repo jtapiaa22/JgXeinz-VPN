@@ -1988,7 +1988,7 @@ adguard_mgr(){
   while true; do
     banner "ADGUARD (SIN PUBLICIDAD)"
     local ip; ip=$(get_ip)
-    if [[ ! -f "$AGH_BIN" ]]; then
+    if [[ ! -f "$AGH_BIN" ]] || ! grep -q 'schema_version' "$AGH_YAML" 2>/dev/null; then
       echo -e " Estado: ${RED}NO INSTALADO${NC}\n"
       echo -e " Bloquea publicidad y rastreadores por DNS para ${WHITE}todos${NC} los"
       echo -e " dispositivos conectados al tunel, sin instalar nada en cada uno."
