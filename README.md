@@ -40,7 +40,7 @@ menu
 - **OpenVPN** autentica con los **mismos usuarios y contraseñas del panel** (PAM); el `.ovpn`
   del cliente pide usuario y contraseña, no lleva certificado compartido.
 - **Tráfico por usuario:** la regla se crea al dar de alta y se persiste (sobrevive reinicios).
-- **Herramientas:** optimizar red (BBR + anti-lag y MTU para 4G), **swap**, banner, dominio, importar usuarios, **zona horaria**,
+- **Herramientas:** optimizar red (BBR + anti-lag y MTU para 4G), **swap**, **AdGuard (DNS sin publicidad)**, banner, dominio, importar usuarios, **zona horaria**,
   **estado de servicios** (ver logs / reiniciar), desinstalar.
 - **Info del VPS** y **Backup** de usuarios (incluye contraseñas **y fechas de vencimiento**).
 

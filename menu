@@ -7,7 +7,7 @@
 
 # ------------------- CONFIG (edita aca) -------------------
 PANEL_NAME="JgXeinz VPN"
-VERSION="1.7"
+VERSION="1.8"
 UDPGW_PORT="7300"
 REPO="https://raw.githubusercontent.com/jtapiaa22/JgXeinz-VPN/main"
 # ----------------------------------------------------------
@@ -591,7 +591,7 @@ exit 0
 EOF
   chmod 755 "$UDPC_DIR/clean.sh"
   [[ -f "$UDPC_DIR/exclude" ]] || echo "53,5300" > "$UDPC_DIR/exclude"
-  cat > /etc/systemd/system/jgx-udpcustom.service /etc/systemd/system/jgx-xray-exp.timer /etc/systemd/system/jgx-xray-exp.service <<EOF
+  cat > /etc/systemd/system/jgx-udpcustom.service /etc/systemd/system/jgx-xray-exp.timer /etc/systemd/system/jgx-xray-exp.service /etc/systemd/system/jgx-adguard.service <<EOF
 [Unit]
 Description=JgXeinz UDP Custom
 After=network-online.target
@@ -1610,7 +1610,7 @@ importar_usuarios(){
 
 estado_servicios(){
   banner "ESTADO DE SERVICIOS"
-  local svcs=(ssh fail2ban squid openvpn@server stunnel4 sslh jgx-dropbear jgx-udpcustom xray jgx-limiter jgx-userbanner)
+  local svcs=(ssh fail2ban squid openvpn@server stunnel4 sslh jgx-dropbear jgx-udpcustom xray jgx-adguard jgx-limiter jgx-userbanner)
   for s in "${svcs[@]}"; do
     if systemctl is-active --quiet "$s" 2>/dev/null; then
       printf " %-18s ${GREEN}%s${NC}\n" "$s" "ACTIVO"
@@ -1653,7 +1653,8 @@ desinstalar(){
   for u in $(systemctl list-units 'jgx-ws@*' 'jgx-badvpn@*' --all --no-legend 2>/dev/null | awk '{print $1}'); do
     systemctl disable --now "$u" 2>/dev/null
   done
-  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear jgx-reboot.timer jgx-udpcustom jgx-xray-exp.timer xray 2>/dev/null
+  agh_redir_del 2>/dev/null
+  systemctl disable --now jgx-limiter jgx-ws jgx-badvpn jgx-userbanner jgx-dropbear jgx-reboot.timer jgx-udpcustom jgx-xray-exp.timer xray jgx-adguard 2>/dev/null
   "$UDPC_DIR/clean.sh" 2>/dev/null
   rm -f /etc/systemd/system/jgx-ws@.service /etc/systemd/system/jgx-badvpn@.service \
         /etc/systemd/system/jgx-badvpn.service /etc/systemd/system/jgx-limiter.service \
@@ -1834,6 +1835,206 @@ UNIT
   done
 }
 
+# --------------------------------------------------------------
+#  ADGUARD HOME (DNS con bloqueo de publicidad)
+# --------------------------------------------------------------
+# Corre en el VPS como servidor DNS con filtrado. Todo el trafico del tunel
+# (SSH y V2Ray) sale por el VPS, asi que redirigimos el puerto 53 hacia
+# AdGuard y queda sin publicidad en TODOS los dispositivos, sin tocar nada
+# en cada uno. Escucha solo en 127.0.0.1 (no es un DNS abierto a internet).
+AGH_DIR="$DIR/adguard"
+AGH_BIN="$AGH_DIR/AdGuardHome"
+AGH_YAML="$AGH_DIR/AdGuardHome.yaml"
+AGH_WEB="3000"            # panel web (solo local, se ve por tunel SSH)
+AGH_DNS="5353"            # DNS interno (solo local)
+AGH_USR="jgx-adguard"     # usuario propio: se excluye del redirect para que no haga bucle
+AGH_VER="v0.107.79"
+AGH_URL="https://github.com/AdguardTeam/AdGuardHome/releases/download/$AGH_VER/AdGuardHome_linux_amd64.tar.gz"
+AGH_SHA="c48f4a43000665484c5ec28177de11a004759b620dae8f77b2aabefc9ef3687f"
+
+agh_on(){ systemctl is-active --quiet jgx-adguard 2>/dev/null; }
+
+# hay redirect de DNS activo?
+agh_redir_on(){ iptables -t nat -C OUTPUT -p udp --dport 53 ! -d 127.0.0.0/8 -m owner ! --uid-owner "$AGH_USR" -j REDIRECT --to-ports "$AGH_DNS" 2>/dev/null; }
+
+agh_redir_add(){
+  local p
+  for p in udp tcp; do
+    iptables -t nat -C OUTPUT -p $p --dport 53 ! -d 127.0.0.0/8 -m owner ! --uid-owner "$AGH_USR" -j REDIRECT --to-ports "$AGH_DNS" 2>/dev/null \
+      || iptables -t nat -A OUTPUT -p $p --dport 53 ! -d 127.0.0.0/8 -m owner ! --uid-owner "$AGH_USR" -j REDIRECT --to-ports "$AGH_DNS"
+  done
+  command -v netfilter-persistent >/dev/null && netfilter-persistent save >/dev/null 2>&1
+}
+
+agh_redir_del(){
+  local p
+  for p in udp tcp; do
+    while iptables -t nat -C OUTPUT -p $p --dport 53 ! -d 127.0.0.0/8 -m owner ! --uid-owner "$AGH_USR" -j REDIRECT --to-ports "$AGH_DNS" 2>/dev/null; do
+      iptables -t nat -D OUTPUT -p $p --dport 53 ! -d 127.0.0.0/8 -m owner ! --uid-owner "$AGH_USR" -j REDIRECT --to-ports "$AGH_DNS"
+    done
+  done
+  command -v netfilter-persistent >/dev/null && netfilter-persistent save >/dev/null 2>&1
+}
+
+# curl autenticado a la API local de AdGuard
+agh_api(){ curl -s -m 5 -u "$(cat "$AGH_DIR/cred" 2>/dev/null)" "http://127.0.0.1:$AGH_WEB$1"; }
+
+agh_install(){
+  [[ "$(uname -m)" == "x86_64" ]] || { echo -e "${RED}AdGuard solo en x86_64${NC}"; return 1; }
+  command -v iptables >/dev/null || { apt-get install -y -qq iptables >/dev/null 2>&1; }
+  # paquete para cambiar la contrasena del panel (bcrypt); si no esta, igual sirve
+  command -v htpasswd >/dev/null || apt-get install -y -qq apache2-utils >/dev/null 2>&1
+  id -u "$AGH_USR" >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin -d "$AGH_DIR" "$AGH_USR" 2>/dev/null
+  mkdir -p "$AGH_DIR"
+  if [[ ! -x "$AGH_BIN" ]]; then
+    echo -e "${YELLOW}Descargando AdGuard Home $AGH_VER...${NC}"
+    curl -fsSL "$AGH_URL" -o "$AGH_DIR/agh.tgz" || { echo -e "${RED}No se pudo descargar${NC}"; return 1; }
+    if ! echo "$AGH_SHA  $AGH_DIR/agh.tgz" | sha256sum -c --status; then
+      rm -f "$AGH_DIR/agh.tgz"; echo -e "${RED}El binario no coincide (sha256). Cancelado.${NC}"; return 1
+    fi
+    tar -xzf "$AGH_DIR/agh.tgz" -C "$AGH_DIR" --strip-components=1 AdGuardHome/AdGuardHome
+    rm -f "$AGH_DIR/agh.tgz"; chmod 755 "$AGH_BIN"
+  fi
+  cat > /etc/systemd/system/jgx-adguard.service <<EOF
+[Unit]
+Description=JgXeinz AdGuard Home
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=$AGH_USR
+WorkingDirectory=$AGH_DIR
+ExecStart=$AGH_BIN --no-check-update -c $AGH_YAML -w $AGH_DIR -h 127.0.0.1 -p $AGH_WEB
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+  chown -R "$AGH_USR":"$AGH_USR" "$AGH_DIR"
+  systemctl daemon-reload
+  return 0
+}
+
+# primer arranque: configura por la API (usuario/clave, DNS en 5353) y escribe el yaml
+agh_setup(){
+  local pass="$1"
+  systemctl enable --now jgx-adguard >/dev/null 2>&1
+  local i ok=""
+  for i in $(seq 1 20); do
+    curl -s -m 3 "http://127.0.0.1:$AGH_WEB/control/install/get_addresses" >/dev/null 2>&1 && { ok=1; break; }
+    sleep 1
+  done
+  [[ -z "$ok" ]] && { echo -e "${RED}AdGuard no respondio al arrancar${NC}"; return 1; }
+  # ya configurado de antes?
+  if [[ -f "$AGH_YAML" ]] && grep -q 'schema_version' "$AGH_YAML"; then return 0; fi
+  local body
+  body=$(printf '{"web":{"ip":"127.0.0.1","port":%s},"dns":{"ip":"127.0.0.1","port":%s},"username":"admin","password":"%s"}' "$AGH_WEB" "$AGH_DNS" "$pass")
+  curl -s -m 10 -X POST "http://127.0.0.1:$AGH_WEB/control/install/configure" -H 'Content-Type: application/json' -d "$body" >/dev/null 2>&1
+  sleep 2
+  echo "admin:$pass" > "$AGH_DIR/cred"; chmod 600 "$AGH_DIR/cred"; chown "$AGH_USR" "$AGH_DIR/cred" 2>/dev/null
+  [[ -f "$AGH_YAML" ]] && grep -q 'schema_version' "$AGH_YAML"
+}
+
+agh_setpass(){
+  command -v htpasswd >/dev/null || { echo -e "${RED}Falta htpasswd (apache2-utils). Cambiala desde el panel web.${NC}"; return 1; }
+  local p h
+  read -rp "Nueva contrasena del panel AdGuard: " p
+  [[ ${#p} -lt 4 ]] && { echo -e "${RED}Muy corta${NC}"; return 1; }
+  h=$(htpasswd -nbBC 10 admin "$p" | cut -d: -f2)
+  [[ -z "$h" ]] && { echo -e "${RED}No se pudo generar${NC}"; return 1; }
+  systemctl stop jgx-adguard 2>/dev/null
+  # reemplaza el hash del usuario admin en el yaml
+  python3 - "$AGH_YAML" "$h" <<'PY2'
+import sys,re
+f,h=sys.argv[1],sys.argv[2]
+t=open(f).read()
+t=re.sub(r'(\n  - name: admin\n    password: )\S+', r'\g<1>'+h, t, count=1)
+open(f,'w').write(t)
+PY2
+  echo "admin:$p" > "$AGH_DIR/cred"; chmod 600 "$AGH_DIR/cred"; chown "$AGH_USR" "$AGH_DIR/cred" 2>/dev/null
+  chown "$AGH_USR":"$AGH_USR" "$AGH_YAML" 2>/dev/null
+  systemctl start jgx-adguard 2>/dev/null
+  echo -e "${GREEN}Contrasena actualizada${NC}"
+}
+
+adguard_mgr(){
+  while true; do
+    banner "ADGUARD (SIN PUBLICIDAD)"
+    local ip; ip=$(get_ip)
+    if [[ ! -x "$AGH_BIN" ]]; then
+      echo -e " Estado: ${RED}NO INSTALADO${NC}\n"
+      echo -e " Bloquea publicidad y rastreadores por DNS para ${WHITE}todos${NC} los"
+      echo -e " dispositivos conectados al tunel, sin instalar nada en cada uno."
+      echo -e " ${GRAY}El panel web queda solo en local; se ve por tunel SSH.${NC}\n"
+      echo -e "${YELLOW}[1]${NC} Instalar y activar"
+      echo -e "${YELLOW}[0]${NC} Volver"
+      echo ""; read -rp "Opcion: " o
+      case $o in
+        1)
+          read -rp "Contrasena para el panel AdGuard [admin / elegi una]: " p
+          [[ -z "$p" ]] && p="admin1234"
+          agh_install || { pause; continue; }
+          if agh_setup "$p"; then
+            agh_redir_add
+            echo -e "\n${GREEN}AdGuard activo. Ya navegas sin publicidad por el tunel.${NC}"
+            echo -e "${GRAY}Usuario: admin   Clave: $p (cambiala con la opcion 5)${NC}"
+          else
+            echo -e "\n${RED}No se pudo configurar. Mira el log (opcion 4).${NC}"
+          fi
+          pause;;
+        0) break;;
+        *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+      esac
+      continue
+    fi
+
+    if agh_on; then echo -e " Servicio: ${GREEN}ACTIVO${NC}"; else echo -e " Servicio: ${RED}detenido${NC}"; fi
+    if agh_redir_on; then echo -e " Filtrado del tunel: ${GREEN}ON${NC} (DNS 53 -> AdGuard)"; else echo -e " Filtrado del tunel: ${RED}OFF${NC}"; fi
+    if agh_on; then
+      local js; js=$(agh_api /control/stats)
+      if [[ -n "$js" ]]; then
+        python3 - "$js" <<'PY2'
+import sys,json
+try: d=json.loads(sys.argv[1])
+except Exception: sys.exit()
+q=d.get('num_dns_queries',0); b=d.get('num_blocked_filtering',0)
+pct=(b*100//q) if q else 0
+print(f" Consultas: {q}   Bloqueadas: {b} ({pct}%)")
+PY2
+      fi
+    fi
+    echo ""
+    echo -e "${YELLOW}[1]${NC} $(agh_on && echo 'Reiniciar' || echo 'Activar')"
+    echo -e "${YELLOW}[2]${NC} $(agh_redir_on && echo 'Quitar filtrado del tunel' || echo 'Activar filtrado del tunel')"
+    echo -e "${YELLOW}[3]${NC} Como entrar al panel web"
+    echo -e "${YELLOW}[4]${NC} Ver log"
+    echo -e "${YELLOW}[5]${NC} Cambiar contrasena del panel"
+    echo -e "${YELLOW}[6]${NC} ${RED}Desactivar (apagar y quitar filtrado)${NC}"
+    echo -e "${YELLOW}[0]${NC} Volver"
+    echo ""; read -rp "Opcion: " o
+    case $o in
+      1) systemctl enable --now jgx-adguard >/dev/null 2>&1; systemctl restart jgx-adguard; sleep 1
+         agh_on && echo -e "${GREEN}OK${NC}" || echo -e "${RED}No arranco (opcion 4)${NC}"; pause;;
+      2) if agh_redir_on; then agh_redir_del; echo -e "${YELLOW}Filtrado quitado: el DNS vuelve a salir directo${NC}"
+         else agh_on || { echo -e "${RED}Primero activa el servicio${NC}"; pause; continue; }; agh_redir_add; echo -e "${GREEN}Filtrado activo${NC}"; fi; pause;;
+      3) echo -e "\n El panel esta en ${WHITE}127.0.0.1:$AGH_WEB${NC} del VPS (no abierto a internet)."
+         echo -e " Para verlo desde tu PC, abri un tunel SSH y entra a http://127.0.0.1:$AGH_WEB :\n"
+         echo -e "   ${CYAN}ssh -L $AGH_WEB:127.0.0.1:$AGH_WEB root@$ip${NC}\n"
+         echo -e " ${GRAY}En Termius/NPV: agregar 'Port Forwarding' local $AGH_WEB -> 127.0.0.1:$AGH_WEB.${NC}"
+         echo -e " ${GRAY}Usuario: admin${NC}"; pause;;
+      4) echo ""; journalctl -u jgx-adguard -n 30 --no-pager 2>/dev/null; pause;;
+      5) agh_setpass; pause;;
+      6) read -rp "Desactivar AdGuard? [s/n]: " r
+         if [[ "$r" =~ ^[sS]$ ]]; then
+           agh_redir_del
+           systemctl disable --now jgx-adguard >/dev/null 2>&1
+           echo -e "${GREEN}AdGuard desactivado. El DNS vuelve a la normalidad.${NC}"
+         fi; pause;;
+      0) break;;
+      *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
+    esac
+  done
+}
+
 herramientas(){
   while true; do
     banner "HERRAMIENTAS"
@@ -1848,7 +2049,8 @@ herramientas(){
     echo -e "${YELLOW}[9]${NC} Speedtest del VPS"
     echo -e "${YELLOW}[10]${NC} Reiniciar VPS"
     echo -e "${YELLOW}[11]${NC} Swap (memoria extra)"
-    echo -e "${YELLOW}[12]${NC} ${RED}Desinstalar el panel${NC}"
+    echo -e "${YELLOW}[12]${NC} AdGuard (DNS sin publicidad)"
+    echo -e "${YELLOW}[13]${NC} ${RED}Desinstalar el panel${NC}"
     echo -e "${YELLOW}[0]${NC} Volver"
     echo ""; read -rp "Opcion: " o
     case $o in
@@ -1863,7 +2065,8 @@ herramientas(){
       9) speedtest_run;;
       10) reiniciar_mgr;;
       11) swap_mgr;;
-      12) desinstalar;;
+      12) adguard_mgr;;
+      13) desinstalar;;
       0) break;;
       *) echo -e "${RED}Opcion invalida${NC}"; sleep 1;;
     esac
